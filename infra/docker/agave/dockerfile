@@ -1,0 +1,44 @@
+FROM rust:1.93-trixie AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        wget \
+        curl \
+        libudev-dev \
+        llvm \
+        libclang-dev \
+        protobuf-compiler \
+        libssl-dev \
+        git \
+        jq \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG AGAVE_VERSION=v4.0.0
+ARG AGAVE_REPO=anza-xyz/agave
+
+WORKDIR /agave
+
+RUN git init && \
+    git remote add origin https://github.com/${AGAVE_REPO}.git && \
+    git fetch --no-tags --prune --depth=1 origin +refs/tags/${AGAVE_VERSION}:refs/tags/${AGAVE_VERSION} && \
+    git checkout --force refs/tags/${AGAVE_VERSION} && \
+    git submodule sync --recursive && \
+    git submodule update --init --force --depth=1 --recursive
+
+RUN ./scripts/cargo-install-all.sh \
+        --no-spl-token \
+        --no-build-deprecated-bins \
+        --no-build-dev-bins \
+        --no-build-platform-tools \
+        .
+
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        jq \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /agave/bin/ /usr/local/bin/

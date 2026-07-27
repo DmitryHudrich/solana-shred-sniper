@@ -1,0 +1,160 @@
+name: solana-localnet
+
+x-image: &image
+  build:
+    context: .
+    dockerfile: docker/agave/dockerfile
+    args:
+      AGAVE_VERSION: v4.0.0
+  image: solana-localnet-agave:v4.0.0
+
+x-validator: &validator
+  <<: *image
+  restart: unless-stopped
+  entrypoint: ["/bin/bash", "/scripts/validator.sh"]
+  security_opt:
+    - seccomp:unconfined
+  volumes:
+    - ./scripts:/scripts:ro
+    - keys:/keys
+    - genesis:/genesis
+  depends_on:
+    genesis:
+      condition: service_completed_successfully
+  ulimits:
+    nofile:
+      soft: 1000000
+      hard: 1000000
+
+services:
+  genesis:
+    <<: *image
+    entrypoint: ["/bin/bash", "/scripts/genesis.sh"]
+    environment:
+      TARGET_TICK_DURATION_US: "15625"
+      SLOTS_PER_EPOCH: "128"
+    volumes:
+      - ./scripts:/scripts:ro
+      - keys:/keys
+      - genesis:/genesis
+    networks:
+      solana:
+
+  faucet:
+    <<: *image
+    restart: unless-stopped
+    entrypoint: ["solana-faucet"]
+    command: ["--keypair", "/keys/faucet.json"]
+    volumes:
+      - keys:/keys
+    depends_on:
+      genesis:
+        condition: service_completed_successfully
+    networks:
+      solana:
+        ipv4_address: 172.28.0.10
+
+  validator1:
+    <<: *validator
+    environment:
+      NODE_NAME: v1
+      GOSSIP_HOST: 172.28.0.11
+    volumes:
+      - ./scripts:/scripts:ro
+      - keys:/keys
+      - genesis:/genesis
+      - ledger1:/ledger
+    ports:
+      - "8899:8899"
+    networks:
+      solana:
+        ipv4_address: 172.28.0.11
+
+  validator2:
+    <<: *validator
+    environment:
+      NODE_NAME: v2
+      GOSSIP_HOST: 172.28.0.12
+      ENTRYPOINT_ADDR: 172.28.0.11:8001
+    volumes:
+      - ./scripts:/scripts:ro
+      - keys:/keys
+      - genesis:/genesis
+      - ledger2:/ledger
+    ports:
+      - "8898:8899"
+    networks:
+      solana:
+        ipv4_address: 172.28.0.12
+
+  validator3:
+    <<: *validator
+    environment:
+      NODE_NAME: v3
+      GOSSIP_HOST: 172.28.0.13
+      ENTRYPOINT_ADDR: 172.28.0.11:8001
+    volumes:
+      - ./scripts:/scripts:ro
+      - keys:/keys
+      - genesis:/genesis
+      - ledger3:/ledger
+    ports:
+      - "8897:8899"
+    networks:
+      solana:
+        ipv4_address: 172.28.0.13
+
+  bench-tps:
+    <<: *image
+    restart: unless-stopped
+    entrypoint: ["solana-bench-tps"]
+    command:
+      - "--url"
+      - "http://172.28.0.11:8899"
+      - "--faucet"
+      - "172.28.0.10:9900"
+      - "--tx-count"
+      - "2000"
+      - "--thread-batch-sleep-ms"
+      - "1000"
+      - "--sustained"
+      - "--duration"
+      - "999999"
+    depends_on:
+      validator1:
+        condition: service_started
+      faucet:
+        condition: service_started
+    networks:
+      solana:
+        ipv4_address: 172.28.0.30
+
+  sniper:
+    build:
+      context: ..
+      dockerfile: apps/shred-sniper/dockerfile
+    restart: unless-stopped
+    environment:
+      ENTRYPOINT: 172.28.0.11:8001
+      ADVERTISE_IP: 172.28.0.20
+      SNIPE_PROGRAM: ${SNIPE_PROGRAM:-}
+      RUST_LOG: ${RUST_LOG:-shred_sniper=info}
+    depends_on:
+      validator1:
+        condition: service_started
+    networks:
+      solana:
+        ipv4_address: 172.28.0.20
+
+networks:
+  solana:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+volumes:
+  keys:
+  genesis:
+  ledger1:
+  ledger2:
+  ledger3:
