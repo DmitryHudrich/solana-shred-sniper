@@ -1,26 +1,9 @@
-//! Shred sniper — MVP.
-//!
-//! Идея: подключиться к кластеру как обычная (незастейканная) нода — попасть в
-//! turbine-дерево и получать шреды напрямую от валидаторов, ещё до того как
-//! блок будет подтверждён и появится в RPC. Из шредов собираем энтри, из энтри
-//! достаём транзакции.
-//!
-//! Что делает программа:
-//!   1. узнаёт shred_version кластера у entrypoint'а (ip-echo на gossip-порту);
-//!   2. поднимает gossip-ноду и анонсирует свой TVU-адрес;
-//!   3. читает UDP с TVU-сокетов, разбирает шреды, собирает энтри;
-//!   4. печатает транзакции, а при совпадении с SNIPE_PROGRAM — помечает «SNIPE».
-//!
-//! Настройки через переменные окружения:
-//!   ENTRYPOINT     gossip-адрес валидатора        (по умолчанию 172.28.0.11:8001)
-//!   ADVERTISE_IP   наш IP, видимый валидаторам    (по умолчанию 172.28.0.1)
-//!   GOSSIP_PORT    порт для gossip                (по умолчанию 8001)
-//!   SNIPE_PROGRAM  base58 program id для триггера (по умолчанию выключено)
-
+mod config;
 mod entries;
 mod shred;
 
 use {
+    config::Config,
     entries::Assembler,
     solana_gossip::{
         cluster_info::{ClusterInfo, NodeConfig},
@@ -36,72 +19,83 @@ use {
     solana_transaction::versioned::VersionedTransaction,
     std::{
         collections::HashSet,
-        env,
-        net::{IpAddr, SocketAddr},
-        num::NonZero,
+        net::SocketAddr,
+        process,
         sync::{
             Arc,
             atomic::{AtomicBool, Ordering},
             mpsc,
         },
         thread,
-        time::{Duration, Instant},
+        time::Instant,
     },
+    tracing::{debug, error, info, info_span},
+    tracing_subscriber::EnvFilter,
 };
 
-/// Диапазон портов, из которого нода берёт все свои сокеты.
-const PORT_RANGE: (u16, u16) = (8100, 8200);
-/// Сколько сокетов слушают turbine. Ядро раскидывает пакеты между ними.
-const TVU_SOCKETS: usize = 4;
-
 fn main() {
-    env_logger::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::new(config::log_filter()))
+        .with_target(true)
+        .pretty()
+        .init();
 
-    let entrypoint: SocketAddr = setting("ENTRYPOINT", "172.28.0.11:8001");
-    let advertise_ip: IpAddr = setting("ADVERTISE_IP", "172.28.0.1");
-    let gossip_port: u16 = setting("GOSSIP_PORT", "8001");
-    // Пустая строка приезжает из docker compose, когда переменную не задали.
-    let snipe_program = env::var("SNIPE_PROGRAM").ok().filter(|it| !it.is_empty());
+    let config = match Config::from_env() {
+        Ok(config) => config,
+        Err(err) => {
+            error!(%err, "invalid configuration");
+            process::exit(1);
+        }
+    };
+    info!(?config, "configuration loaded");
 
-    // Валидаторы игнорируют ноды с чужим shred_version, так что сначала
-    // спрашиваем его у entrypoint'а — на его gossip-порту висит ip-echo сервер.
-    let shred_version = get_cluster_shred_version(&entrypoint)
-        .unwrap_or_else(|err| panic!("не удалось узнать shred_version у {entrypoint}: {err}"));
+    let shred_version = match get_cluster_shred_version(&config.entrypoint) {
+        Ok(shred_version) => shred_version,
+        Err(err) => {
+            error!(entrypoint = %config.entrypoint, %err, "failed to fetch shred_version");
+            process::exit(1);
+        }
+    };
 
     let keypair = Arc::new(Keypair::new());
-    println!("identity      {}", keypair.pubkey());
-    println!("entrypoint    {entrypoint}");
-    println!("shred_version {shred_version}");
-    if let Some(program) = &snipe_program {
-        println!("snipe target  {program}");
-    }
+    info!(
+        identity = %keypair.pubkey(),
+        entrypoint = %config.entrypoint,
+        shred_version,
+        snipe_program = config.snipe_program.as_deref().unwrap_or("<disabled>"),
+        "starting"
+    );
 
-    // Биндимся на тот же адрес, который анонсируем: валидаторы шлют turbine
-    // именно на него.
-    let bind_ip_addrs = BindIpAddrs::new(vec![advertise_ip]).expect("не смогли забиндиться");
+    let bind_ip_addrs = match BindIpAddrs::new(vec![config.advertise_ip]) {
+        Ok(bind_ip_addrs) => bind_ip_addrs,
+        Err(err) => {
+            error!(advertise_ip = %config.advertise_ip, %err, "failed to bind advertised ip");
+            process::exit(1);
+        }
+    };
     let mut node = Node::new_with_external_ip(
         &keypair.pubkey(),
         NodeConfig {
-            advertised_ip: advertise_ip,
-            gossip_port,
-            port_range: PORT_RANGE,
+            advertised_ip: config.advertise_ip,
+            gossip_port: config.gossip_port,
+            port_range: config.port_range,
             bind_ip_addrs,
             public_tpu_addr: None,
             public_tpu_forwards_addr: None,
             public_tvu_addr: None,
-            num_tvu_receive_sockets: NonZero::new(TVU_SOCKETS).unwrap(),
-            num_tvu_retransmit_sockets: NonZero::new(1).unwrap(),
-            num_quic_endpoints: NonZero::new(1).unwrap(),
+            num_tvu_receive_sockets: config.tvu_receive_sockets,
+            num_tvu_retransmit_sockets: config.tvu_retransmit_sockets,
+            num_quic_endpoints: config.quic_endpoints,
         },
     );
     node.info.set_shred_version(shred_version);
-    println!("tvu           {}", node.info.tvu(Protocol::UDP).unwrap());
+    info!(tvu = %node.info.tvu(Protocol::UDP).unwrap(), "node is up");
 
     let mut cluster_info =
         ClusterInfo::new(node.info.clone(), keypair, SocketAddrSpace::Unspecified);
     cluster_info.set_bind_ip_addrs(node.bind_ip_addrs.clone());
     let cluster_info = Arc::new(cluster_info);
-    cluster_info.set_entrypoint(ContactInfo::new_gossip_entry_point(&entrypoint));
+    cluster_info.set_entrypoint(ContactInfo::new_gossip_entry_point(&config.entrypoint));
 
     let exit = Arc::new(AtomicBool::new(false));
     let gossip_service = GossipService::new(
@@ -109,44 +103,54 @@ fn main() {
         None,
         node.sockets.gossip.clone(),
         None,
-        /*should_check_duplicate_instance:*/ true,
+        config.check_duplicate_instance,
         None,
         exit.clone(),
     );
 
-    // Каждый TVU-сокет читает свой поток, разбор — в одном месте, чтобы не
-    // городить синхронизацию вокруг сборщика энтри.
     let (sender, receiver) = mpsc::channel::<(SocketAddr, Vec<u8>)>();
-    for socket in node.sockets.tvu {
+    for (index, socket) in node.sockets.tvu.into_iter().enumerate() {
         let sender = sender.clone();
         let exit = exit.clone();
-        thread::spawn(move || {
-            let mut buffer = [0u8; 2048];
-            while !exit.load(Ordering::Relaxed) {
-                if let Ok((size, from)) = socket.recv_from(&mut buffer)
-                    && sender.send((from, buffer[..size].to_vec())).is_err()
-                {
-                    break;
+        let buffer_bytes = config.packet_buffer_bytes.get();
+        thread::Builder::new()
+            .name(format!("tvu-rx-{index}"))
+            .spawn(move || {
+                let span = info_span!("tvu_rx", socket = index);
+                let _guard = span.enter();
+                let mut buffer = vec![0u8; buffer_bytes];
+                while !exit.load(Ordering::Relaxed) {
+                    if let Ok((size, from)) = socket.recv_from(&mut buffer)
+                        && sender.send((from, buffer[..size].to_vec())).is_err()
+                    {
+                        debug!("receiver dropped, shutting down");
+                        break;
+                    }
                 }
-            }
-        });
+            })
+            .expect("failed to spawn tvu reader thread");
     }
     drop(sender);
 
-    // Раз в 5 секунд говорим, кого видим в gossip: если пиров нет, шредов не будет.
     {
         let cluster_info = cluster_info.clone();
         let exit = exit.clone();
-        thread::spawn(move || {
-            while !exit.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_secs(5));
-                let peers = cluster_info.tvu_peers(|peer| *peer.pubkey()).len();
-                println!("[gossip] tvu-пиров: {peers}");
-            }
-        });
+        let interval = config.gossip_stats_interval;
+        thread::Builder::new()
+            .name("gossip-stats".to_string())
+            .spawn(move || {
+                let span = info_span!("gossip");
+                let _guard = span.enter();
+                while !exit.load(Ordering::Relaxed) {
+                    thread::sleep(interval);
+                    let peers = cluster_info.tvu_peers(|peer| *peer.pubkey()).len();
+                    info!(tvu_peers = peers, "gossip state");
+                }
+            })
+            .expect("failed to spawn gossip stats thread");
     }
 
-    let mut assembler = Assembler::default();
+    let mut assembler = Assembler::new(config.slot_retention);
     let mut shreds_seen = 0u64;
     let mut last_slot = 0u64;
     let mut sources = HashSet::new();
@@ -158,24 +162,24 @@ fn main() {
         };
         shreds_seen += 1;
 
-        // Кто именно нам ретранслирует: полезно понимать, из какого места
-        // turbine-дерева приходят данные.
         if sources.insert(from.ip()) {
-            println!("[turbine] шреды приходят с {}", from.ip());
+            info!(source = %from.ip(), "new turbine source");
         }
 
         if data_shred.slot > last_slot {
             last_slot = data_shred.slot;
-            println!(
-                "[слот {last_slot}] шредов получено: {shreds_seen}, аптайм: {:.0}с",
-                started.elapsed().as_secs_f64()
+            info!(
+                slot = last_slot,
+                shreds = shreds_seen,
+                uptime_secs = started.elapsed().as_secs(),
+                "new slot"
             );
         }
 
         let slot = data_shred.slot;
         for entry in assembler.insert(&data_shred) {
             for transaction in &entry.transactions {
-                report(slot, transaction, snipe_program.as_deref());
+                report(slot, transaction, config.snipe_program.as_deref());
             }
         }
     }
@@ -184,7 +188,6 @@ fn main() {
     let _ = gossip_service.join();
 }
 
-/// Печатает транзакцию; если она трогает нужную программу — помечает её.
 fn report(slot: u64, transaction: &VersionedTransaction, snipe_program: Option<&str>) {
     let message = &transaction.message;
     let keys = message.static_account_keys();
@@ -202,25 +205,16 @@ fn report(slot: u64, transaction: &VersionedTransaction, snipe_program: Option<&
         .signatures
         .first()
         .map(ToString::to_string)
-        .unwrap_or_else(|| "<без подписи>".to_string());
+        .unwrap_or_else(|| "<no signature>".to_string());
     let payer = keys
         .first()
         .map(ToString::to_string)
         .unwrap_or_else(|| "?".to_string());
+    let programs = programs.join(", ");
 
-    let marker = if hit { "🎯 SNIPE" } else { "  tx" };
-    println!(
-        "{marker} слот={slot} sig={signature} payer={payer} программы=[{}]",
-        programs.join(", ")
-    );
-}
-
-/// Читает настройку из окружения, иначе берёт значение по умолчанию.
-fn setting<T: std::str::FromStr>(name: &str, default: &str) -> T
-where
-    T::Err: std::fmt::Display,
-{
-    let raw = env::var(name).unwrap_or_else(|_| default.to_string());
-    raw.parse()
-        .unwrap_or_else(|err| panic!("некорректное значение {name}={raw}: {err}"))
+    if hit {
+        info!(slot, %signature, %payer, %programs, "🎯 SNIPE");
+    } else {
+        info!(slot, %signature, %payer, %programs, "tx");
+    }
 }
