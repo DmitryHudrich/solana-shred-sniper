@@ -149,12 +149,75 @@ services:
       GOSSIP_STATS_INTERVAL_SECS: ${GOSSIP_STATS_INTERVAL_SECS:-5}
       SLOT_RETENTION: ${SLOT_RETENTION:-64}
       SNIPE_PROGRAM: ${SNIPE_PROGRAM:-}
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-shred-sniper}
+      METRICS_EXPORT_INTERVAL_SECS: ${METRICS_EXPORT_INTERVAL_SECS:-5}
+      METRICS_EXPORT_TIMEOUT_SECS: ${METRICS_EXPORT_TIMEOUT_SECS:-5}
     depends_on:
       validator1:
+        condition: service_started
+      otel-collector:
         condition: service_started
     networks:
       solana:
         ipv4_address: 172.28.0.20
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.140.1
+    restart: unless-stopped
+    command: ["--config", "/etc/otel/config.yaml"]
+    volumes:
+      - ./docker/otel-collector/config.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "4318:4318"
+      - "8889:8889"
+    networks:
+      solana:
+        ipv4_address: 172.28.0.40
+
+  prometheus:
+    image: prom/prometheus:v3.7.3
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=6h"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      otel-collector:
+        condition: service_started
+    networks:
+      solana:
+        ipv4_address: 172.28.0.41
+
+  grafana:
+    image: grafana/grafana:12.4.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_DEFAULT_THEME: dark
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/shred-sniper.json
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      prometheus:
+        condition: service_started
+    networks:
+      solana:
+        ipv4_address: 172.28.0.42
 
 networks:
   solana:
@@ -168,3 +231,5 @@ volumes:
   ledger1:
   ledger2:
   ledger3:
+  prometheus:
+  grafana:
