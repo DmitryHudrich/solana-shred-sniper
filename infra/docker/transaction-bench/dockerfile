@@ -1,0 +1,33 @@
+FROM rust:1.93-trixie AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        clang \
+        libclang-dev \
+        libssl-dev \
+        protobuf-compiler \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG TPU_TOOLS_REPO=anza-xyz/tpu-tools
+ARG TPU_TOOLS_REF=9356451eb270954be6e8f4cefffcbb6a729a8d31
+
+WORKDIR /tpu-tools
+
+RUN git init && \
+    git remote add origin https://github.com/${TPU_TOOLS_REPO}.git && \
+    git fetch --no-tags --prune --depth=1 origin ${TPU_TOOLS_REF} && \
+    git checkout --force FETCH_HEAD
+
+RUN cargo build --release --locked --package solana-transaction-bench
+
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        libssl3t64 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /tpu-tools/target/release/solana-transaction-bench /usr/local/bin/

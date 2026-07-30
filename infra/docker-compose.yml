@@ -104,26 +104,42 @@ services:
       solana:
         ipv4_address: 172.28.0.13
 
-  bench-tps:
-    <<: *image
+  transaction-bench:
+    build:
+      context: .
+      dockerfile: docker/transaction-bench/dockerfile
+      args:
+        TPU_TOOLS_REF: ${TPU_TOOLS_REF:-9356451eb270954be6e8f4cefffcbb6a729a8d31}
     restart: unless-stopped
-    entrypoint: ["solana-bench-tps"]
-    command:
-      - "--url"
-      - "http://172.28.0.11:8899"
-      - "--faucet"
-      - "172.28.0.10:9900"
-      - "--tx-count"
-      - "2000"
-      - "--thread-batch-sleep-ms"
-      - "1000"
-      - "--sustained"
-      - "--duration"
-      - "999999"
+    entrypoint: ["/bin/bash", "/scripts/transaction-bench.sh"]
+    environment:
+      RUST_LOG: ${BENCH_RUST_LOG:-info}
+      RPC_URL: ${BENCH_RPC_URL:-http://172.28.0.11:8899}
+      AUTHORITY: ${BENCH_AUTHORITY:-/keys/faucet.json}
+      STAKED_IDENTITY_FILES: ${BENCH_STAKED_IDENTITY_FILES:-/keys/v1-identity.json}
+      LEADER_TRACKER: ${BENCH_LEADER_TRACKER:-ws-leader-tracker}
+      LEADER_TRACKER_ARGS: ${BENCH_LEADER_TRACKER_ARGS:-}
+      NUM_PAYERS: ${BENCH_NUM_PAYERS:-256}
+      PAYER_ACCOUNT_BALANCE: ${BENCH_PAYER_ACCOUNT_BALANCE:-1SOL}
+      DURATION: ${BENCH_DURATION:-}
+      TARGET_TPS: ${BENCH_TARGET_TPS:-}
+      TRANSFER_TX_CU_BUDGET: ${BENCH_TRANSFER_TX_CU_BUDGET:-600}
+      NUM_SEND_INSTRUCTIONS_PER_TX: ${BENCH_NUM_SEND_INSTRUCTIONS_PER_TX:-1}
+      MAX_LAMPORTS_TO_TRANSFER: ${BENCH_MAX_LAMPORTS_TO_TRANSFER:-65536}
+      NUM_MAX_OPEN_CONNECTIONS: ${BENCH_NUM_MAX_OPEN_CONNECTIONS:-16}
+      WORKERS_PULL_SIZE: ${BENCH_WORKERS_PULL_SIZE:-8}
+      SEND_FANOUT: ${BENCH_SEND_FANOUT:-2}
+      COMPUTE_UNIT_PRICE: ${BENCH_COMPUTE_UNIT_PRICE:-}
+      RANDOM_COMPUTE_UNIT_PRICE_MAX: ${BENCH_RANDOM_COMPUTE_UNIT_PRICE_MAX:-}
+      PRIORITY_FEE_SCHEDULE_PERIOD_MS: ${BENCH_PRIORITY_FEE_SCHEDULE_PERIOD_MS:-}
+      TX_BATCH_SIZE: ${BENCH_TX_BATCH_SIZE:-}
+      NUM_CONFLICT_GROUPS: ${BENCH_NUM_CONFLICT_GROUPS:-}
+      VALIDATE_ACCOUNTS: ${BENCH_VALIDATE_ACCOUNTS:-false}
+    volumes:
+      - ./scripts:/scripts:ro
+      - keys:/keys
     depends_on:
       validator1:
-        condition: service_started
-      faucet:
         condition: service_started
     networks:
       solana:
