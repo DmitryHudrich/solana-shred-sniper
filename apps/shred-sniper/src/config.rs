@@ -1,10 +1,13 @@
-use std::{
-    env,
-    fmt::{self, Display},
-    net::{IpAddr, SocketAddr},
-    num::NonZero,
-    str::FromStr,
-    time::Duration,
+use {
+    solana_transaction::Address,
+    std::{
+        env,
+        fmt::{self, Display},
+        net::{IpAddr, SocketAddr},
+        num::NonZero,
+        str::FromStr,
+        time::Duration,
+    },
 };
 
 pub const ENV_LOG: &str = "RUST_LOG";
@@ -16,11 +19,15 @@ pub const ENV_PORT_RANGE_MAX: &str = "PORT_RANGE_MAX";
 pub const ENV_TVU_RECEIVE_SOCKETS: &str = "TVU_RECEIVE_SOCKETS";
 pub const ENV_TVU_RETRANSMIT_SOCKETS: &str = "TVU_RETRANSMIT_SOCKETS";
 pub const ENV_QUIC_ENDPOINTS: &str = "QUIC_ENDPOINTS";
-pub const ENV_PACKET_BUFFER_BYTES: &str = "PACKET_BUFFER_BYTES";
 pub const ENV_CHECK_DUPLICATE_INSTANCE: &str = "CHECK_DUPLICATE_INSTANCE";
 pub const ENV_GOSSIP_STATS_INTERVAL_SECS: &str = "GOSSIP_STATS_INTERVAL_SECS";
 pub const ENV_SLOT_RETENTION: &str = "SLOT_RETENTION";
 pub const ENV_SNIPE_PROGRAM: &str = "SNIPE_PROGRAM";
+pub const ENV_METRICS_ENABLED: &str = "METRICS_ENABLED";
+pub const ENV_OTLP_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
+pub const ENV_SERVICE_NAME: &str = "OTEL_SERVICE_NAME";
+pub const ENV_METRICS_EXPORT_INTERVAL_SECS: &str = "METRICS_EXPORT_INTERVAL_SECS";
+pub const ENV_METRICS_EXPORT_TIMEOUT_SECS: &str = "METRICS_EXPORT_TIMEOUT_SECS";
 
 const DEFAULT_LOG: &str = "shred_sniper=info";
 const DEFAULT_ENTRYPOINT: &str = "172.28.0.11:8001";
@@ -31,10 +38,19 @@ const DEFAULT_PORT_RANGE_MAX: &str = "8200";
 const DEFAULT_TVU_RECEIVE_SOCKETS: &str = "4";
 const DEFAULT_TVU_RETRANSMIT_SOCKETS: &str = "1";
 const DEFAULT_QUIC_ENDPOINTS: &str = "1";
-const DEFAULT_PACKET_BUFFER_BYTES: &str = "2048";
 const DEFAULT_CHECK_DUPLICATE_INSTANCE: &str = "true";
 const DEFAULT_GOSSIP_STATS_INTERVAL_SECS: &str = "5";
 const DEFAULT_SLOT_RETENTION: &str = "64";
+const DEFAULT_METRICS_ENABLED: &str = "true";
+const DEFAULT_OTLP_ENDPOINT: &str = "http://otel-collector:4318";
+const DEFAULT_SERVICE_NAME: &str = "shred-sniper";
+const DEFAULT_METRICS_EXPORT_INTERVAL_SECS: &str = "5";
+const DEFAULT_METRICS_EXPORT_TIMEOUT_SECS: &str = "5";
+
+/// `SLOT_RETENTION` is expressed in slots because that is how the operator
+/// thinks about it, but buffers age out on the clock, so it is converted once
+/// here at the cluster's slot time.
+const SLOT_DURATION: Duration = Duration::from_millis(400);
 
 #[derive(Debug)]
 pub struct ConfigError {
@@ -60,11 +76,15 @@ pub struct Config {
     pub tvu_receive_sockets: NonZero<usize>,
     pub tvu_retransmit_sockets: NonZero<usize>,
     pub quic_endpoints: NonZero<usize>,
-    pub packet_buffer_bytes: NonZero<usize>,
     pub check_duplicate_instance: bool,
     pub gossip_stats_interval: Duration,
-    pub slot_retention: u64,
-    pub snipe_program: Option<String>,
+    pub retention: Duration,
+    pub snipe_program: Option<Address>,
+    pub metrics_enabled: bool,
+    pub otlp_endpoint: String,
+    pub service_name: String,
+    pub metrics_export_interval: Duration,
+    pub metrics_export_timeout: Duration,
 }
 
 impl Config {
@@ -92,7 +112,6 @@ impl Config {
                 DEFAULT_TVU_RETRANSMIT_SOCKETS,
             )?,
             quic_endpoints: parse(ENV_QUIC_ENDPOINTS, DEFAULT_QUIC_ENDPOINTS)?,
-            packet_buffer_bytes: parse(ENV_PACKET_BUFFER_BYTES, DEFAULT_PACKET_BUFFER_BYTES)?,
             check_duplicate_instance: parse(
                 ENV_CHECK_DUPLICATE_INSTANCE,
                 DEFAULT_CHECK_DUPLICATE_INSTANCE,
@@ -101,8 +120,19 @@ impl Config {
                 ENV_GOSSIP_STATS_INTERVAL_SECS,
                 DEFAULT_GOSSIP_STATS_INTERVAL_SECS,
             )?),
-            slot_retention: parse(ENV_SLOT_RETENTION, DEFAULT_SLOT_RETENTION)?,
-            snipe_program: optional(ENV_SNIPE_PROGRAM),
+            retention: SLOT_DURATION * parse::<u32>(ENV_SLOT_RETENTION, DEFAULT_SLOT_RETENTION)?,
+            snipe_program: optional_parse(ENV_SNIPE_PROGRAM)?,
+            metrics_enabled: parse(ENV_METRICS_ENABLED, DEFAULT_METRICS_ENABLED)?,
+            otlp_endpoint: parse(ENV_OTLP_ENDPOINT, DEFAULT_OTLP_ENDPOINT)?,
+            service_name: parse(ENV_SERVICE_NAME, DEFAULT_SERVICE_NAME)?,
+            metrics_export_interval: Duration::from_secs(parse(
+                ENV_METRICS_EXPORT_INTERVAL_SECS,
+                DEFAULT_METRICS_EXPORT_INTERVAL_SECS,
+            )?),
+            metrics_export_timeout: Duration::from_secs(parse(
+                ENV_METRICS_EXPORT_TIMEOUT_SECS,
+                DEFAULT_METRICS_EXPORT_TIMEOUT_SECS,
+            )?),
         })
     }
 }
@@ -118,6 +148,24 @@ where
 {
     let value = optional(name).unwrap_or_else(|| default.to_string());
     value.parse().map_err(|err: T::Err| ConfigError {
+        name,
+        value,
+        reason: err.to_string(),
+    })
+}
+
+/// Like [`parse`], but for settings that are simply off when unset. Parsing
+/// here rather than at the point of use turns a typo into a startup failure
+/// instead of a filter that silently never matches.
+fn optional_parse<T>(name: &'static str) -> Result<Option<T>, ConfigError>
+where
+    T: FromStr,
+    T::Err: Display,
+{
+    let Some(value) = optional(name) else {
+        return Ok(None);
+    };
+    value.parse().map(Some).map_err(|err: T::Err| ConfigError {
         name,
         value,
         reason: err.to_string(),

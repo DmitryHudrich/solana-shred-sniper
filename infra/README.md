@@ -90,10 +90,13 @@ All instruments are prefixed `sniper.` in OTLP and `sniper_` in Prometheus.
 | `sniper_snipe_hits_total` | counter | transactions touching `SNIPE_PROGRAM` |
 | `sniper_batches_total{outcome}` | counter | entry batches, `outcome` = `decoded` \| `marker` \| `failed` |
 | `sniper_packets_received_total` | counter | datagrams read from the TVU sockets |
-| `sniper_packets_rejected_total` | counter | datagrams that are not data shreds (mostly coding shreds) |
+| `sniper_packets_rejected_total` | counter | datagrams that are neither data nor coding shreds |
 | `sniper_shreds_received_total` | counter | data shreds parsed |
-| `sniper_shreds_duplicate_total` | counter | data shreds delivered more than once |
-| `sniper_shreds_missing_total` | counter | data shreds never received before the slot aged out |
+| `sniper_coding_shreds_received_total` | counter | coding shreds parsed, the input to erasure recovery |
+| `sniper_shreds_recovered_total` | counter | data shreds reconstructed from their erasure batch |
+| `sniper_shreds_duplicate_total` | counter | data shreds delivered more than once, including ones turbine delivers after we already recovered them |
+| `sniper_shreds_missing_total` | counter | data shreds neither received nor recovered before the slot aged out |
+| `sniper_fec_sets_incomplete_total` | counter | erasure batches that stayed below the Reed-Solomon threshold |
 | `sniper_batch_latency_seconds` | histogram | first shred of a batch to its decoded transactions |
 | `sniper_packet_latency_seconds` | histogram | per-packet parse and assemble time |
 | `sniper_slot_duration_seconds` | histogram | wall time between consecutive slots |
@@ -108,6 +111,12 @@ All instruments are prefixed `sniper.` in OTLP and `sniper_` in Prometheus.
 
 Counters that have never fired are absent from `/metrics` until their first
 increment; dashboard queries wrap those in `or vector(0)`.
+
+Shreds lost in turbine are rebuilt locally from the coding shreds of the same
+erasure batch, so `sniper_shreds_missing_total` only moves when a batch stays
+below the Reed-Solomon threshold. Recovery fires as soon as a batch has enough
+shreds, which often beats turbine to the remaining data shreds — those then
+arrive as duplicates.
 
 ## Configuration
 
