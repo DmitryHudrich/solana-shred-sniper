@@ -1,0 +1,236 @@
+use {
+    crate::{
+        config::Config,
+        entries::Assembler,
+        erasure::Recovery,
+        metrics::{Metrics, PacketKind},
+        shred::{self, DataShred},
+    },
+    solana_streamer::packet::Packet,
+    solana_transaction::{Address, versioned::VersionedTransaction},
+    std::{
+        collections::HashSet,
+        net::IpAddr,
+        sync::Arc,
+        time::{Duration, Instant},
+    },
+    tracing::{Level, debug, enabled, info},
+};
+
+const VOTE_PROGRAM: &str = "Vote111111111111111111111111111111111111111";
+
+/// Slot numbers come off the wire unauthenticated. Latching on to the highest
+/// one ever seen would let a single spoofed shred freeze the per-slot counters
+/// for good, so a slot this far below the current one re-anchors them instead.
+const MAX_SLOT_ADVANCE: u64 = 1024;
+
+/// A slot runs 64 ticks, so a shred's reference tick places it to about six
+/// milliseconds within the slot *by the leader's clock*. Comparing that against
+/// when the shred reached us is the only reading on delivery timing available
+/// without a second source of truth. It is a cluster parameter, not a constant
+/// of nature: a cluster with another tick rate would need this changed.
+const TICK: Duration = Duration::from_nanos(400_000_000 / 64);
+
+/// Everything that resets at a slot boundary, kept together so crossing one is
+/// a single assignment and no counter can be left behind.
+struct SlotState {
+    /// The slot the packet path is anchored on.
+    number: u64,
+    /// When we first saw a shred of it, which is the only slot clock we have.
+    started: Instant,
+    shreds: u64,
+    transactions: u64,
+}
+
+impl SlotState {
+    fn new(number: u64) -> Self {
+        Self {
+            number,
+            started: Instant::now(),
+            shreds: 0,
+            transactions: 0,
+        }
+    }
+}
+
+/// The parse path: a datagram in, metrics and snipe reports out.
+pub struct Pipeline {
+    assembler: Assembler,
+    recovery: Recovery,
+    metrics: Arc<Metrics>,
+    shred_version: u16,
+    vote_program: Address,
+    snipe_program: Option<Address>,
+    /// Peers that have sent us shreds, so a new one can be reported once
+    /// rather than on every packet.
+    sources: HashSet<IpAddr>,
+    shreds_seen: u64,
+    slot: SlotState,
+    started: Instant,
+}
+
+impl Pipeline {
+    pub fn new(config: &Config, shred_version: u16, metrics: Arc<Metrics>) -> Self {
+        Self {
+            assembler: Assembler::new(config.retention, metrics.clone()),
+            recovery: Recovery::new(config.retention, metrics.clone()),
+            metrics,
+            shred_version,
+            vote_program: VOTE_PROGRAM.parse().expect("vote program id is valid"),
+            snipe_program: config.snipe_program,
+            sources: HashSet::new(),
+            shreds_seen: 0,
+            slot: SlotState::new(0),
+            started: Instant::now(),
+        }
+    }
+
+    /// One datagram. Coding shreds carry no entries of their own, they only let
+    /// us reconstruct data shreds turbine failed to deliver, so what comes out
+    /// of a packet is the data shred it held — if any — plus whatever its
+    /// erasure batch could rebuild.
+    pub fn packet(&mut self, packet: &Packet) {
+        let Some(bytes) = packet.data(..) else {
+            return;
+        };
+        let from = packet.meta().addr;
+        let processing_started = Instant::now();
+        let shred_version = self.shred_version;
+
+        let recovered;
+        let received = match shred::parse(bytes, shred_version) {
+            Some(shred::Shred::Data(data_shred)) => {
+                self.metrics.packet_received(PacketKind::Data);
+                if self.sources.insert(from) {
+                    self.metrics.set_turbine_sources(self.sources.len() as u64);
+                    info!(source = %from, "new turbine source");
+                }
+                recovered = self.recovery.insert_data(&data_shred);
+                Some(data_shred)
+            }
+            Some(shred::Shred::Coding(coding_shred)) => {
+                self.metrics.packet_received(PacketKind::Coding);
+                recovered = self.recovery.insert_coding(&coding_shred);
+                None
+            }
+            None => {
+                self.metrics.packet_received(PacketKind::Other);
+                return;
+            }
+        };
+
+        // Recovered shreds are tagged so a batch can later say whether it
+        // waited on erasure rather than on the wire.
+        if let Some(data_shred) = &received {
+            self.data_shred(data_shred, false);
+        }
+        for body in &recovered {
+            if let Some(data_shred) = shred::parse_data(body, shred_version) {
+                self.data_shred(&data_shred, true);
+            }
+        }
+
+        self.metrics.packet_processed(processing_started.elapsed());
+    }
+
+    fn data_shred(&mut self, shred: &DataShred<'_>, from_recovery: bool) {
+        self.anchor(shred.slot);
+        self.shreds_seen += 1;
+        self.slot.shreds += 1;
+
+        // How far into the slot we are, by our own clock. Measured after the
+        // anchor moves so it is always relative to the slot the shred actually
+        // belongs to.
+        let slot_offset = self.slot.started.elapsed();
+
+        // Recovered shreds arrive when we reconstruct them, not when the leader
+        // sent them, so including them would measure our own recovery rather
+        // than turbine's delivery.
+        if shred.slot == self.slot.number && !from_recovery {
+            self.metrics
+                .delivery_skew(slot_offset, TICK * u32::from(shred.reference_tick));
+        }
+
+        for entry in self.assembler.insert(shred, from_recovery) {
+            for transaction in &entry.transactions {
+                self.slot.transactions += 1;
+                self.report(shred.slot, slot_offset, transaction);
+            }
+        }
+    }
+
+    /// Moves the slot anchor, closing out the counters of the slot being left.
+    /// It moves on two conditions rather than one: forward for a higher slot,
+    /// and backward for a slot far enough below that what we are anchored on
+    /// cannot have been the leader's own progress.
+    fn anchor(&mut self, slot: u64) {
+        let advanced = slot > self.slot.number;
+        let stale = slot.saturating_add(MAX_SLOT_ADVANCE) < self.slot.number;
+        if !advanced && !stale {
+            return;
+        }
+
+        // The first slot we ever see has no predecessor to have taken time.
+        let duration = (self.slot.number != 0).then(|| self.slot.started.elapsed());
+        self.metrics
+            .slot_completed(slot, duration, self.slot.shreds, self.slot.transactions);
+        self.slot = SlotState::new(slot);
+        info!(
+            slot,
+            shreds = self.shreds_seen,
+            uptime_secs = self.started.elapsed().as_secs(),
+            "new slot"
+        );
+    }
+
+    fn report(&self, slot: u64, slot_offset: Duration, transaction: &VersionedTransaction) {
+        let message = &transaction.message;
+        let keys = message.static_account_keys();
+        // Programs a lookup table would resolve are invisible here, so a snipe
+        // target reached through one is missed rather than misreported. Counting
+        // the transactions that carry one is what puts a size on that blind spot
+        // instead of leaving it as a caveat in a comment.
+        let opaque = message
+            .address_table_lookups()
+            .is_some_and(|lookups| !lookups.is_empty());
+        let programs = || {
+            message
+                .instructions()
+                .iter()
+                .filter_map(|instruction| keys.get(instruction.program_id_index as usize))
+        };
+
+        let vote = programs().any(|program| *program == self.vote_program);
+        let hit = self
+            .snipe_program
+            .is_some_and(|target| programs().any(|program| *program == target));
+        self.metrics.transaction(vote, hit, opaque, slot_offset);
+
+        // Base58 encoding every key of every transaction costs more than the
+        // rest of the packet path at mainnet rates, so only a logged one pays
+        // for it.
+        if !hit && !enabled!(Level::DEBUG) {
+            return;
+        }
+
+        let signature = transaction
+            .signatures
+            .first()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "<no signature>".to_string());
+        let payer = keys
+            .first()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "?".to_string());
+        let programs = programs()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        if hit {
+            info!(slot, %signature, %payer, %programs, "🎯 SNIPE");
+        } else {
+            debug!(slot, %signature, %payer, %programs, "tx");
+        }
+    }
+}

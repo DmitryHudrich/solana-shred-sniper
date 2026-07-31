@@ -418,6 +418,8 @@ mod tests {
             index: 0,
             fec_set_index: 0,
             data_complete: false,
+            last_in_slot: false,
+            reference_tick: 0,
             data: &[],
             shard: &[1, 2, 3],
         };

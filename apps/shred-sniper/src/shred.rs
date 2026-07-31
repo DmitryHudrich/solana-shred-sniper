@@ -34,6 +34,18 @@ const MAX_SHARD: usize = CODE_PAYLOAD - (SIGNATURE + CODE_HEADERS) - MERKLE_ROOT
 
 const FLAG_DATA_COMPLETE: u8 = 0b0100_0000;
 
+/// agave's `LAST_SHRED_IN_SLOT` sets the data-complete bit too, so the whole
+/// mask has to match: plenty of shreds close an entry batch without closing the
+/// slot. Knowing which shred ends a slot is what turns its index into the
+/// number of shreds the slot was supposed to have.
+const FLAG_LAST_IN_SLOT: u8 = 0b1100_0000;
+
+/// The low six bits hold the tick the leader was on when it produced the shred,
+/// saturating at 63. It is the only reference to the leader's own clock that
+/// reaches us on the wire, so it is what makes delivery timing measurable
+/// without a second source of truth.
+const TICK_REFERENCE_MASK: u8 = 0b0011_1111;
+
 // Shreds carry no signature we can check, so every field is attacker
 // controlled. A leader never puts more than this many data shreds in a slot
 // (agave's MAX_DATA_SHREDS_PER_SLOT), and everything downstream sizes its
@@ -46,6 +58,11 @@ pub struct DataShred<'a> {
     pub index: u32,
     pub fec_set_index: u32,
     pub data_complete: bool,
+    /// Set on the shred that closes the slot, whose index therefore gives the
+    /// slot's total data shred count.
+    pub last_in_slot: bool,
+    /// Tick within the slot at which the leader produced this shred.
+    pub reference_tick: u8,
     /// Entry bytes carried by this shred.
     pub data: &'a [u8],
     /// The slice erasure coding is computed over, needed to recover siblings.
@@ -69,10 +86,16 @@ pub enum Shred<'a> {
 }
 
 pub fn parse(packet: &[u8], shred_version: u16) -> Option<Shred<'_>> {
+    const DATA: u8 = 0x90;
+    const DATA_RESIGNED: u8 = 0xb0;
+    const CODING: u8 = 0x60;
+    const CODING_RESIGNED: u8 = 0x70;
+    const MERKLE_PROOF_LEN: u8 = 0xf0;
+
     let body = packet.get(SIGNATURE..)?;
-    match body.first()? & 0xf0 {
-        0x90 | 0xb0 => parse_data(body, shred_version).map(Shred::Data),
-        0x60 | 0x70 => parse_coding(body, shred_version).map(Shred::Coding),
+    match body.first()? & MERKLE_PROOF_LEN {
+        DATA | DATA_RESIGNED => parse_data(body, shred_version).map(Shred::Data),
+        CODING | CODING_RESIGNED => parse_coding(body, shred_version).map(Shred::Coding),
         _ => None,
     }
 }
@@ -104,11 +127,15 @@ pub fn parse_data(body: &[u8], shred_version: u16) -> Option<DataShred<'_>> {
     let index = read_u32(body, INDEX).filter(|index| *index < MAX_SHREDS_PER_SLOT)?;
     let fec_set_index = read_u32(body, FEC_SET_INDEX).filter(|first| *first <= index)?;
 
+    let flags = *body.get(DATA_FLAGS)?;
+
     Some(DataShred {
         slot: read_u64(body, SLOT)?,
         index,
         fec_set_index,
-        data_complete: body.get(DATA_FLAGS)? & FLAG_DATA_COMPLETE != 0,
+        data_complete: flags & FLAG_DATA_COMPLETE != 0,
+        last_in_slot: flags & FLAG_LAST_IN_SLOT == FLAG_LAST_IN_SLOT,
+        reference_tick: flags & TICK_REFERENCE_MASK,
         data: shard.get(DATA_HEADERS..size)?,
         shard,
     })
@@ -193,6 +220,82 @@ mod tests {
             .unwrap()
             .payload()
             .to_vec()
+    }
+
+    /// Every data shred of one slot, in index order, as the leader emits them.
+    fn slot_shreds(reference_tick: u8, last_in_slot: bool) -> Vec<Vec<u8>> {
+        let payload: Vec<u8> = (0..40 * 1024u32).map(|byte| byte as u8).collect();
+        let mut shreds: Vec<AgaveShred> = Shredder::new(42, 41, reference_tick, SHRED_VERSION)
+            .unwrap()
+            .make_shreds_from_data_slice(
+                &Keypair::new(),
+                &payload,
+                last_in_slot,
+                Hash::default(),
+                0,
+                0,
+                &ReedSolomonCache::default(),
+                &mut ProcessShredsStats::default(),
+            )
+            .unwrap()
+            .filter(AgaveShred::is_data)
+            .collect();
+        shreds.sort_by_key(AgaveShred::index);
+        shreds
+            .into_iter()
+            .map(|shred| shred.payload().to_vec())
+            .collect()
+    }
+
+    /// The slot's shred count is only knowable from the shred that closes it,
+    /// and that flag shares a byte with the batch-complete one, so reading it
+    /// as a whole mask rather than a single bit is the difference between
+    /// knowing the slot's size and mistaking every batch boundary for its end.
+    #[test]
+    fn finds_the_shred_that_closes_the_slot() {
+        let payloads = slot_shreds(0, true);
+        assert!(payloads.len() > 1, "one shred would not prove the point");
+
+        let flagged: Vec<u32> = payloads
+            .iter()
+            .filter_map(|payload| match parse(payload, SHRED_VERSION) {
+                Some(Shred::Data(shred)) if shred.last_in_slot => Some(shred.index),
+                _ => None,
+            })
+            .collect();
+
+        let last = payloads.len() as u32 - 1;
+        assert_eq!(
+            flagged,
+            vec![last],
+            "only the closing shred carries the flag"
+        );
+
+        // A slot the leader has not finished must leave us without a count.
+        assert!(
+            slot_shreds(0, false)
+                .iter()
+                .filter_map(|payload| match parse(payload, SHRED_VERSION) {
+                    Some(Shred::Data(shred)) => Some(shred.last_in_slot),
+                    _ => None,
+                })
+                .all(|last_in_slot| !last_in_slot),
+            "an unfinished slot must not look closed"
+        );
+    }
+
+    /// The reference tick shares its byte with the flags, so a leader tick of
+    /// zero and a masking bug look identical unless a non-zero one is checked.
+    #[test]
+    fn reads_the_leader_tick_out_of_the_flag_byte() {
+        for tick in [0u8, 7, 63] {
+            for payload in slot_shreds(tick, true) {
+                let Some(Shred::Data(shred)) = parse(&payload, SHRED_VERSION) else {
+                    panic!("data shred did not parse");
+                };
+                assert_eq!(shred.reference_tick, tick, "tick {tick} came back wrong");
+            }
+        }
     }
 
     /// Nothing checks the signature, so a forged field parses on its merits.
