@@ -1,0 +1,61 @@
+# Single-binary Loki on local disk. The sniper's log volume is a handful of
+# lines per slot, not a cluster's worth, so every knob here is set for a stack
+# that gets torn down and brought back up rather than for durability.
+auth_enabled: false
+
+server:
+  http_listen_address: 0.0.0.0
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  # Loki's own logs are not what this stack is for.
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+
+# v13 + tsdb is what structured metadata requires, and structured metadata is
+# the whole point: OTLP log attributes land there instead of becoming labels,
+# so a signature per line costs nothing in index cardinality.
+schema_config:
+  configs:
+    - from: "2024-01-01"
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /loki/tsdb-index
+    cache_location: /loki/tsdb-cache
+
+# Defaults hold a chunk open for hours. That is right for a cluster and wrong
+# here, where the container is restarted often and anything still in memory
+# has to be replayed from the WAL to come back.
+ingester:
+  chunk_idle_period: 1m
+  max_chunk_age: 5m
+
+limits_config:
+  retention_period: 24h
+  allow_structured_metadata: true
+  volume_enabled: true
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+
+analytics:
+  reporting_enabled: false

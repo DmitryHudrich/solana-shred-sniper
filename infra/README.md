@@ -9,6 +9,7 @@ docker compose up -d
 | --- | --- | --- |
 | Grafana | http://localhost:3000 | anonymous viewer, `admin` / `admin` to edit |
 | Prometheus | http://localhost:9090 | scrapes the collector every 5s |
+| Loki | http://localhost:3100 | logs, 24h retention |
 | OTel Collector | http://localhost:4318 | OTLP/HTTP in, `:8889/metrics` out |
 | Validator RPC | http://localhost:8899 | validator1 |
 
@@ -21,6 +22,39 @@ The sniper pushes OTLP metrics to the collector, the collector exposes them in
 Prometheus format, Prometheus scrapes it, Grafana reads Prometheus. The
 `Shred Sniper` dashboard is provisioned from
 `docker/grafana/dashboards/shred-sniper.json` and is the default home dashboard.
+
+Logs take the same road out — OTLP to the collector — and the collector forwards
+them to Loki, which ingests OTLP natively. Metrics and logs answer different
+questions and neither substitutes for the other: a metric cannot name a
+transaction, because a signature as a label is unbounded cardinality and would
+take Prometheus down, and a log cannot be aggregated cheaply. What Loki indexes
+is only `service_name`; every field attached to a line — `slot`, `signature`,
+whatever the sniper adds — lands in structured metadata, which is queryable but
+costs nothing in the index. `LOGS_ENABLED=false` keeps logs on stdout only.
+
+```sh
+# what the sniper logged about a slot, as a table
+{service_name="shred-sniper"} | slot="12345"
+```
+
+## Bot against wallet
+
+Set `SEARCHER_WALLETS` to the bot's fee payers and `TARGET_WALLETS` to those of
+the wallet it is racing, and the sniper emits a `race` line per slot in which
+either side traded. The `Bot vs wallet, by slot` table on the dashboard is that
+line, one row per pair.
+
+The gap is measured in the leader's order, not in ours. A batch is decoded when
+its last shred arrives, so an early batch delivered late is decoded after a
+later one — arrival order would report the race backwards. Order comes from the
+shred indices, and a slot is reported a second after its last shred so that the
+stragglers and whatever erasure could rebuild are counted too.
+
+Two columns qualify the number. `same_entry` means both transactions sit in one
+entry: the leader put them there because they touch no common account, so they
+execute in parallel and the gap between them orders nothing. `exact` is false
+when a batch that never decoded sits between the two, which leaves the count
+short by however many transactions it carried.
 
 Running the sniper outside compose, against the same stack:
 
@@ -88,6 +122,8 @@ All instruments are prefixed `sniper.` in OTLP and `sniper_` in Prometheus.
 | `sniper_entries_total` | counter | entries decoded |
 | `sniper_slots_total` | counter | slots seen; `1/rate()` is block time |
 | `sniper_snipe_hits_total` | counter | transactions touching `SNIPE_PROGRAM` |
+| `sniper_watched_transactions_total` | counter | transactions paid for by a wallet in `TARGET_WALLETS` |
+| `sniper_watched_offset_seconds` | histogram | how far into the slot such a transaction was before we could see it; the slot's length minus that is the budget for reacting to it |
 | `sniper_batches_total{outcome}` | counter | entry batches, `outcome` = `decoded` \| `marker` \| `failed` |
 | `sniper_packets_received_total` | counter | datagrams read from the TVU sockets |
 | `sniper_packets_rejected_total` | counter | datagrams that are neither data nor coding shreds |
@@ -128,8 +164,11 @@ Every parameter is an environment variable, listed with its default in the
 | `ENTRYPOINT` | `172.28.0.11:8001` | validator gossip address |
 | `ADVERTISE_IP` | `172.28.0.1` | address validators send turbine to |
 | `SNIPE_PROGRAM` | unset | base58 program id to flag |
+| `SEARCHER_WALLETS` | unset | comma-separated fee payers of the bot |
+| `TARGET_WALLETS` | unset | comma-separated fee payers of the wallet it races |
 | `SLOT_RETENTION` | `64` | slots kept in the assembler |
 | `METRICS_ENABLED` | `true` | set `false` to run without OTLP |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://otel-collector:4318` | base URL, `/v1/metrics` is appended |
+| `LOGS_ENABLED` | `true` | set `false` to keep logs on stdout |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://otel-collector:4318` | base URL, `/v1/metrics` and `/v1/logs` are appended |
 | `METRICS_EXPORT_INTERVAL_SECS` | `5` | OTLP push interval |
 | `RUST_LOG` | `shred_sniper=info` | `shred_sniper=debug` logs every transaction |

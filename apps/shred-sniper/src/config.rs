@@ -23,7 +23,10 @@ pub const ENV_CHECK_DUPLICATE_INSTANCE: &str = "CHECK_DUPLICATE_INSTANCE";
 pub const ENV_GOSSIP_STATS_INTERVAL_SECS: &str = "GOSSIP_STATS_INTERVAL_SECS";
 pub const ENV_SLOT_RETENTION: &str = "SLOT_RETENTION";
 pub const ENV_SNIPE_PROGRAM: &str = "SNIPE_PROGRAM";
+pub const ENV_SEARCHER_WALLETS: &str = "SEARCHER_WALLETS";
+pub const ENV_TARGET_WALLETS: &str = "TARGET_WALLETS";
 pub const ENV_METRICS_ENABLED: &str = "METRICS_ENABLED";
+pub const ENV_LOGS_ENABLED: &str = "LOGS_ENABLED";
 pub const ENV_OTLP_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
 pub const ENV_SERVICE_NAME: &str = "OTEL_SERVICE_NAME";
 pub const ENV_METRICS_EXPORT_INTERVAL_SECS: &str = "METRICS_EXPORT_INTERVAL_SECS";
@@ -42,6 +45,7 @@ const DEFAULT_CHECK_DUPLICATE_INSTANCE: &str = "true";
 const DEFAULT_GOSSIP_STATS_INTERVAL_SECS: &str = "5";
 const DEFAULT_SLOT_RETENTION: &str = "64";
 const DEFAULT_METRICS_ENABLED: &str = "true";
+const DEFAULT_LOGS_ENABLED: &str = "true";
 const DEFAULT_OTLP_ENDPOINT: &str = "http://otel-collector:4318";
 const DEFAULT_SERVICE_NAME: &str = "shred-sniper";
 const DEFAULT_METRICS_EXPORT_INTERVAL_SECS: &str = "5";
@@ -80,7 +84,12 @@ pub struct Config {
     pub gossip_stats_interval: Duration,
     pub retention: Duration,
     pub snipe_program: Option<Address>,
+    /// Fee payers of the bot, and of the wallet it is racing. Both have to be
+    /// set for anything to be reported: one runner is not a race.
+    pub searcher_wallets: Vec<Address>,
+    pub target_wallets: Vec<Address>,
     pub metrics_enabled: bool,
+    pub logs_enabled: bool,
     pub otlp_endpoint: String,
     pub service_name: String,
     pub metrics_export_interval: Duration,
@@ -122,7 +131,10 @@ impl Config {
             )?),
             retention: SLOT_DURATION * parse::<u32>(ENV_SLOT_RETENTION, DEFAULT_SLOT_RETENTION)?,
             snipe_program: optional_parse(ENV_SNIPE_PROGRAM)?,
+            searcher_wallets: optional_list(ENV_SEARCHER_WALLETS)?,
+            target_wallets: optional_list(ENV_TARGET_WALLETS)?,
             metrics_enabled: parse(ENV_METRICS_ENABLED, DEFAULT_METRICS_ENABLED)?,
+            logs_enabled: parse(ENV_LOGS_ENABLED, DEFAULT_LOGS_ENABLED)?,
             otlp_endpoint: parse(ENV_OTLP_ENDPOINT, DEFAULT_OTLP_ENDPOINT)?,
             service_name: parse(ENV_SERVICE_NAME, DEFAULT_SERVICE_NAME)?,
             metrics_export_interval: Duration::from_secs(parse(
@@ -137,8 +149,17 @@ impl Config {
     }
 }
 
+/// The OTLP exporter's own HTTP stack emits tracing events, and those events are
+/// then shipped out through that same exporter: under any filter looser than the
+/// default it feeds itself and never settles. Silencing those targets is what
+/// breaks the loop, and it is appended rather than prepended so that it holds
+/// even when `RUST_LOG` names them.
+const EXPORTER_NOISE: &str =
+    "hyper=off,hyper_util=off,reqwest=off,h2=off,tower=off,opentelemetry=off,opentelemetry_sdk=off";
+
 pub fn log_filter() -> String {
-    optional(ENV_LOG).unwrap_or_else(|| DEFAULT_LOG.to_string())
+    let filter = optional(ENV_LOG).unwrap_or_else(|| DEFAULT_LOG.to_string());
+    format!("{filter},{EXPORTER_NOISE}")
 }
 
 fn parse<T>(name: &'static str, default: &str) -> Result<T, ConfigError>
@@ -170,6 +191,31 @@ where
         value,
         reason: err.to_string(),
     })
+}
+
+/// Like [`optional_parse`], but for a comma-separated list. Empty when unset;
+/// a single bad entry fails startup rather than being dropped, because a typo
+/// in an address would otherwise read as "that wallet simply never traded".
+fn optional_list<T>(name: &'static str) -> Result<Vec<T>, ConfigError>
+where
+    T: FromStr,
+    T::Err: Display,
+{
+    let Some(value) = optional(name) else {
+        return Ok(Vec::new());
+    };
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            entry.parse().map_err(|err: T::Err| ConfigError {
+                name,
+                value: entry.to_string(),
+                reason: err.to_string(),
+            })
+        })
+        .collect()
 }
 
 fn optional(name: &str) -> Option<String> {

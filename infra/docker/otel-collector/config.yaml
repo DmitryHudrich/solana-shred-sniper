@@ -12,6 +12,15 @@ processors:
     send_batch_size: 1024
 
 exporters:
+  # Loki ingests OTLP natively, so no Loki-specific exporter is involved: the
+  # resource attributes become stream labels and everything the sniper attaches
+  # to a line becomes structured metadata, which is what keeps a signature per
+  # line from turning into a label.
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+
   prometheus:
     endpoint: 0.0.0.0:8889
     namespace: ""
@@ -32,6 +41,10 @@ service:
       receivers: [otlp]
       processors: [batch]
       exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/loki]
   telemetry:
     logs:
       level: info

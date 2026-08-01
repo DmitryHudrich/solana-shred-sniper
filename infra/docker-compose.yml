@@ -35,6 +35,7 @@ services:
       SLOTS_PER_EPOCH: "128"
     volumes:
       - ./scripts:/scripts:ro
+      - ../spl_memo.so:/programs/spl_memo.so:ro
       - keys:/keys
       - genesis:/genesis
     networks:
@@ -164,7 +165,10 @@ services:
       GOSSIP_STATS_INTERVAL_SECS: ${GOSSIP_STATS_INTERVAL_SECS:-5}
       SLOT_RETENTION: ${SLOT_RETENTION:-64}
       SNIPE_PROGRAM: ${SNIPE_PROGRAM:-}
+      SEARCHER_WALLETS: ${SEARCHER_WALLETS:-}
+      TARGET_WALLETS: ${TARGET_WALLETS:-}
       METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      LOGS_ENABLED: ${LOGS_ENABLED:-true}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-shred-sniper}
       METRICS_EXPORT_INTERVAL_SECS: ${METRICS_EXPORT_INTERVAL_SECS:-5}
@@ -187,9 +191,25 @@ services:
     ports:
       - "4318:4318"
       - "8889:8889"
+    depends_on:
+      loki:
+        condition: service_started
     networks:
       solana:
         ipv4_address: 172.28.0.40
+
+  loki:
+    image: grafana/loki:3.7.4
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/config.yaml"]
+    volumes:
+      - ./docker/loki/config.yaml:/etc/loki/config.yaml:ro
+      - loki:/loki
+    ports:
+      - "3100:3100"
+    networks:
+      solana:
+        ipv4_address: 172.28.0.43
 
   prometheus:
     image: prom/prometheus:v3.7.3
@@ -230,6 +250,8 @@ services:
     depends_on:
       prometheus:
         condition: service_started
+      loki:
+        condition: service_started
     networks:
       solana:
         ipv4_address: 172.28.0.42
@@ -248,3 +270,4 @@ volumes:
   ledger3:
   prometheus:
   grafana:
+  loki:

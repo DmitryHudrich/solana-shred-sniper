@@ -4,6 +4,7 @@ use {
         entries::Assembler,
         erasure::Recovery,
         metrics::{Metrics, PacketKind},
+        race,
         shred::{self, DataShred},
     },
     solana_streamer::packet::Packet,
@@ -64,6 +65,12 @@ pub struct Pipeline {
     /// Peers that have sent us shreds, so a new one can be reported once
     /// rather than on every packet.
     sources: HashSet<IpAddr>,
+    /// Fee payers of the wallets being raced. Reacting to one of their
+    /// transactions is only possible with slot left to react in, so what these
+    /// are here for is to time how much of it there is.
+    watched: HashSet<Address>,
+    /// Present only when a wallet to watch is configured.
+    race: Option<race::Tracker>,
     shreds_seen: u64,
     slot: SlotState,
     started: Instant,
@@ -79,6 +86,8 @@ impl Pipeline {
             vote_program: VOTE_PROGRAM.parse().expect("vote program id is valid"),
             snipe_program: config.snipe_program,
             sources: HashSet::new(),
+            watched: config.target_wallets.iter().copied().collect(),
+            race: race::Tracker::new(&config.searcher_wallets, &config.target_wallets),
             shreds_seen: 0,
             slot: SlotState::new(0),
             started: Instant::now(),
@@ -138,23 +147,30 @@ impl Pipeline {
         self.shreds_seen += 1;
         self.slot.shreds += 1;
 
-        // How far into the slot we are, by our own clock. Measured after the
-        // anchor moves so it is always relative to the slot the shred actually
-        // belongs to.
-        let slot_offset = self.slot.started.elapsed();
+        // How far into the slot we are, by our own clock. Only the anchored
+        // slot has a start we can measure against: a shred of a slot we have
+        // already left would be timed from the wrong origin and read as having
+        // arrived far earlier than it did, which is precisely the direction
+        // that would flatter every latency below.
+        let slot_offset = (shred.slot == self.slot.number).then(|| self.slot.started.elapsed());
 
         // Recovered shreds arrive when we reconstruct them, not when the leader
         // sent them, so including them would measure our own recovery rather
         // than turbine's delivery.
-        if shred.slot == self.slot.number && !from_recovery {
+        if let (Some(offset), false) = (slot_offset, from_recovery) {
             self.metrics
-                .delivery_skew(slot_offset, TICK * u32::from(shred.reference_tick));
+                .delivery_skew(offset, TICK * u32::from(shred.reference_tick));
         }
 
-        for entry in self.assembler.insert(shred, from_recovery) {
-            for transaction in &entry.transactions {
-                self.slot.transactions += 1;
-                self.report(shred.slot, slot_offset, transaction);
+        for batch in self.assembler.insert(shred, from_recovery) {
+            for entry in &batch.entries {
+                for transaction in &entry.transactions {
+                    self.slot.transactions += 1;
+                    self.report(shred.slot, slot_offset, transaction);
+                }
+            }
+            if let Some(race) = &mut self.race {
+                race.batch(shred.slot, &batch);
             }
         }
     }
@@ -183,7 +199,7 @@ impl Pipeline {
         );
     }
 
-    fn report(&self, slot: u64, slot_offset: Duration, transaction: &VersionedTransaction) {
+    fn report(&self, slot: u64, slot_offset: Option<Duration>, transaction: &VersionedTransaction) {
         let message = &transaction.message;
         let keys = message.static_account_keys();
         // Programs a lookup table would resolve are invisible here, so a snipe
@@ -199,6 +215,15 @@ impl Pipeline {
                 .iter()
                 .filter_map(|instruction| keys.get(instruction.program_id_index as usize))
         };
+
+        // The wallet being raced is known by who pays, not by what it calls: a
+        // key further down the account list is not the sender.
+        if keys
+            .first()
+            .is_some_and(|payer| self.watched.contains(payer))
+        {
+            self.metrics.watched_transaction(slot_offset);
+        }
 
         let vote = programs().any(|program| *program == self.vote_program);
         let hit = self

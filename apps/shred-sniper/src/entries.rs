@@ -53,6 +53,28 @@ enum Payload {
     Stitched(Vec<u8>),
 }
 
+/// A completed batch, before it is decoded.
+struct Complete {
+    payload: Payload,
+    first_received: Instant,
+    recovered: bool,
+    first_shred: u32,
+    last_shred: u32,
+}
+
+/// A batch's entries together with the shreds they came from.
+///
+/// The range is what places the batch inside its slot. Batches are runs of
+/// consecutive shred indices, so sorting by where a batch begins sorts them the
+/// way the leader laid them down — which is emphatically not the order they
+/// finish arriving in, and the order is the whole point when the question is
+/// which of two transactions came first.
+pub struct DecodedBatch {
+    pub first_shred: u32,
+    pub last_shred: u32,
+    pub entries: Vec<Entry>,
+}
+
 struct SlotBuffer {
     /// Entry bytes of every shred held, back to back. One growing buffer per
     /// slot rather than a `Vec` per shred: the packet path is what pays for
@@ -110,7 +132,7 @@ impl SlotBuffer {
         self.stale = 0;
     }
 
-    fn take_complete_batches(&mut self) -> Vec<(Payload, Instant, bool)> {
+    fn take_complete_batches(&mut self) -> Vec<Complete> {
         let starts: Vec<u32> = std::iter::once(0)
             .chain(
                 self.shreds
@@ -165,7 +187,15 @@ impl SlotBuffer {
                     Payload::Stitched(stitched)
                 };
                 self.emitted.insert(start);
-                batches.push((payload, first_received, recovered));
+                batches.push(Complete {
+                    payload,
+                    first_received,
+                    recovered,
+                    first_shred: start,
+                    // The loop leaves `index` one past the shred that closed
+                    // the batch.
+                    last_shred: index - 1,
+                });
             }
         }
 
@@ -207,7 +237,11 @@ impl Assembler {
     /// `recovered` says whether this shred came out of erasure recovery rather
     /// than off the wire, which is what lets a batch report which path it
     /// waited on.
-    pub fn insert(&mut self, shred: &crate::shred::DataShred<'_>, recovered: bool) -> Vec<Entry> {
+    pub fn insert(
+        &mut self,
+        shred: &crate::shred::DataShred<'_>,
+        recovered: bool,
+    ) -> Vec<DecodedBatch> {
         let now = Instant::now();
         self.evict(now);
 
@@ -234,26 +268,36 @@ impl Assembler {
             self.metrics.shred_duplicate();
         }
 
-        let batches = buffer.take_complete_batches();
-        let mut entries = Vec::new();
-        for (payload, first_received, recovered) in batches {
-            let latency = first_received.elapsed();
-            let batch = match &payload {
+        let completed = buffer.take_complete_batches();
+        let mut batches = Vec::new();
+        for complete in completed {
+            let latency = complete.first_received.elapsed();
+            let bytes = match &complete.payload {
                 Payload::Arena { at, len } => &buffer.arena[*at..*at + *len],
                 Payload::Stitched(stitched) => stitched.as_slice(),
             };
-            match decode_batch(batch) {
-                Batch::Entries(decoded) => {
+            match decode_batch(bytes) {
+                Batch::Entries(entries) => {
                     self.metrics
-                        .batch(BatchOutcome::Decoded, latency, recovered);
-                    self.metrics.entries(decoded.len() as u64);
-                    entries.extend(decoded);
+                        .batch(BatchOutcome::Decoded, latency, complete.recovered);
+                    self.metrics.entries(entries.len() as u64);
+                    batches.push(DecodedBatch {
+                        first_shred: complete.first_shred,
+                        last_shred: complete.last_shred,
+                        entries,
+                    });
                 }
-                Batch::Marker => self.metrics.batch(BatchOutcome::Marker, latency, recovered),
-                Batch::Invalid => self.metrics.batch(BatchOutcome::Failed, latency, recovered),
+                Batch::Marker => {
+                    self.metrics
+                        .batch(BatchOutcome::Marker, latency, complete.recovered)
+                }
+                Batch::Invalid => {
+                    self.metrics
+                        .batch(BatchOutcome::Failed, latency, complete.recovered)
+                }
             }
         }
-        entries
+        batches
     }
 
     /// Slot numbers arrive unauthenticated, so a slot ages out on the wall
@@ -427,8 +471,12 @@ mod tests {
                 data,
                 shard: &[],
             };
-            for entry in assembler.insert(&shred, false) {
-                transactions += entry.transactions.len();
+            for batch in assembler.insert(&shred, false) {
+                transactions += batch
+                    .entries
+                    .iter()
+                    .map(|entry| entry.transactions.len())
+                    .sum::<usize>();
             }
         }
         transactions
@@ -541,7 +589,7 @@ mod tests {
 
         let mut batches = buffer.take_complete_batches();
         assert_eq!(batches.len(), 1, "the batch was complete");
-        let (payload, ..) = batches.remove(0);
+        let payload = batches.remove(0).payload;
         let bytes = match &payload {
             Payload::Arena { at, len } => buffer.arena[*at..*at + *len].to_vec(),
             Payload::Stitched(stitched) => stitched.clone(),

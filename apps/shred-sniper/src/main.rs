@@ -1,9 +1,11 @@
 mod config;
 mod entries;
 mod erasure;
+mod logs;
 mod metrics;
 mod netstat;
 mod pipeline;
+mod race;
 mod receiver;
 mod shred;
 
@@ -34,26 +36,36 @@ use {
         time::Duration,
     },
     tracing::{debug, error, info},
-    tracing_subscriber::EnvFilter,
 };
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(config::log_filter()))
-        .with_target(true)
-        .pretty()
-        .init();
+    // The subscriber has to know where to ship logs, so the config is read
+    // before it exists — which makes this the one failure with no `tracing` to
+    // report itself through.
+    let config = match Config::from_env() {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("invalid configuration: {err}");
+            process::exit(1);
+        }
+    };
+    let logs_guard = logs::init(&config);
 
-    if let Err(err) = run() {
+    let result = run(config);
+    if let Err(err) = &result {
         error!(%err, "startup failed");
+    }
+    // Exiting skips destructors, so the exporter is flushed here rather than
+    // left to a `Drop` that would never run on the failure path.
+    drop(logs_guard);
+    if result.is_err() {
         process::exit(1);
     }
 }
 
 /// Brings the node up, then hands every datagram the receivers collect to the
 /// pipeline until they hang up.
-fn run() -> Result<(), Box<dyn Error>> {
-    let config = Config::from_env().map_err(|err| format!("invalid configuration: {err}"))?;
+fn run(config: Config) -> Result<(), Box<dyn Error>> {
     info!(?config, "configuration loaded");
 
     let (metrics, _metrics_guard) = metrics::init(&config);
@@ -126,8 +138,12 @@ fn build_node(
     keypair: &Keypair,
     shred_version: u16,
 ) -> Result<Node, Box<dyn Error>> {
-    let bind_ip_addrs = BindIpAddrs::new(vec![config.advertise_ip])
-        .map_err(|err| format!("failed to bind advertised ip {}: {err}", config.advertise_ip))?;
+    let bind_ip_addrs = BindIpAddrs::new(vec![config.advertise_ip]).map_err(|err| {
+        format!(
+            "failed to bind advertised ip {}: {err}",
+            config.advertise_ip
+        )
+    })?;
     let mut node = Node::new_with_external_ip(
         &keypair.pubkey(),
         NodeConfig {

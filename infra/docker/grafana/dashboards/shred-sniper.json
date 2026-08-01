@@ -203,14 +203,14 @@
       "id": 6,
       "type": "stat",
       "title": "Shred loss",
-      "description": "Share of data shreds never received before their slot aged out. Anything above zero means the TPS and transaction feed are undercounting.",
+      "description": "Share of data shreds never received before their slot aged out, out of every shred the slot should have had. Erasure-recovered shreds count as received, so this is the loss that survived recovery: anything above zero means the TPS and transaction feed are undercounting. What turbine dropped before recovery is on 'Shred loss before and after recovery'.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 5, "w": 3, "x": 21, "y": 0 },
       "targets": [
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "(sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0)) / clamp_min(sum(rate(sniper_shreds_received_total{job=\"$job\"}[$__rate_interval])) + (sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0)), 0.001)",
+          "expr": "(sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0)) / clamp_min(sum(rate(sniper_shreds_received_total{job=\"$job\"}[$__rate_interval])) + (sum(rate(sniper_shreds_recovered_total{job=\"$job\"}[$__rate_interval])) or vector(0)) + (sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0)), 0.001)",
           "legendFormat": "loss"
         }
       ],
@@ -957,6 +957,402 @@
       },
       "options": {
         "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "Erasure recovery",
+      "description": "Data shreds rebuilt from their erasure batch, against the ones that stayed lost and the batches that could not be repaired at all. Recovery is the only thing standing between turbine dropping a shred and us never seeing its transactions: without it, 'recovered' would be added to 'still missing'.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 47 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(sniper_shreds_recovered_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
+          "legendFormat": "recovered"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
+          "legendFormat": "still missing"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(sniper_fec_sets_incomplete_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
+          "legendFormat": "unrecoverable batches"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix:/s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "recovered" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "still missing" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "unrecoverable batches" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Shred loss before and after recovery",
+      "description": "What turbine failed to deliver, and what was still missing once Reed-Solomon had done its work. Both are measured against every data shred the slot should have had, so the gap between the lines is exactly what recovery bought us. Note this differs from the 'Shred loss' stat above, which leaves recovered shreds out of its denominator.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 47 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "((sum(rate(sniper_shreds_recovered_total{job=\"$job\"}[$__rate_interval])) or vector(0)) + (sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0))) / clamp_min(sum(rate(sniper_shreds_received_total{job=\"$job\"}[$__rate_interval])) + (sum(rate(sniper_shreds_recovered_total{job=\"$job\"}[$__rate_interval])) or vector(0)) + (sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0)), 0.001)",
+          "legendFormat": "turbine loss"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "(sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0)) / clamp_min(sum(rate(sniper_shreds_received_total{job=\"$job\"}[$__rate_interval])) + (sum(rate(sniper_shreds_recovered_total{job=\"$job\"}[$__rate_interval])) or vector(0)) + (sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0)), 0.001)",
+          "legendFormat": "after recovery"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "turbine loss" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "after recovery" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 31,
+      "type": "table",
+      "title": "Bot vs wallet, by slot",
+      "description": "One row per slot where either side traded. tx_gap is how many transactions separate the bot from the wallet inside the block. Reacting to a transaction can only land behind it, so a bot that snipes this wallet has a positive gap and small is good; a negative one means the bot fired on its own rather than in response. same_entry means the two share an entry, and transactions of one entry execute in parallel — the gap is still real but it does not order them. exact is false when a batch we never decoded sits between the two, which makes the count short by whatever it held. Until the bot exists, every row carries the wallet's signature alone, which is the baseline it will be judged against.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 54 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "{service_name=\"shred-sniper\"} |= `race`",
+          "queryType": "range",
+          "maxLines": 500
+        }
+      ],
+      "transformations": [
+        {
+          "id": "extractFields",
+          "options": { "source": "labels", "format": "json", "replace": false, "keepTime": true }
+        },
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              { "targetField": "tx_gap", "destinationType": "number" },
+              { "targetField": "entry_gap", "destinationType": "number" },
+              { "targetField": "slot", "destinationType": "number" }
+            ]
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Line": true,
+              "labels": true,
+              "labelTypes": true,
+              "tsNs": true,
+              "id": true,
+              "detected_level": true,
+              "scope_name": true,
+              "service_name": true,
+              "service_version": true,
+              "severity_number": true,
+              "severity_text": true,
+              "telemetry_sdk_language": true,
+              "telemetry_sdk_name": true,
+              "telemetry_sdk_version": true
+            },
+            "indexByName": {
+              "Time": 0,
+              "slot": 1,
+              "tx_gap": 2,
+              "entry_gap": 3,
+              "same_entry": 4,
+              "exact": 5,
+              "searcher": 6,
+              "target": 7
+            },
+            "renameByName": {
+              "searcher": "bot signature",
+              "target": "wallet signature"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "left", "cellOptions": { "type": "auto" }, "filterable": true }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "tx_gap" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+              { "id": "custom.align", "value": "right" },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "text", "value": null },
+                    { "color": "green", "value": 0 },
+                    { "color": "#EAB839", "value": 25 },
+                    { "color": "red", "value": 100 }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "entry_gap" },
+            "properties": [{ "id": "custom.align", "value": "right" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "exact" },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": { "false": { "color": "orange", "index": 0, "text": "false" } }
+                  }
+                ]
+              },
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": { "show": false, "reducer": ["sum"], "countRows": false, "fields": "" },
+        "sortBy": [{ "displayName": "Time", "desc": true }]
+      }
+    },
+    {
+      "id": 32,
+      "type": "stat",
+      "title": "Watched wallet",
+      "description": "Transactions per second paid for by a wallet in TARGET_WALLETS. Zero means either the wallet is idle or the address is wrong — nothing else on this row can be read until this one moves.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 5, "x": 0, "y": 64 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(sniper_watched_transactions_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
+          "legendFormat": "tx/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix:tx/s",
+          "decimals": 2,
+          "color": { "mode": "fixed", "fixedColor": "text" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      }
+    },
+    {
+      "id": 33,
+      "type": "stat",
+      "title": "Slot left, typical",
+      "description": "What is left of the slot by the time the wallet's transaction is decoded here. This is the entire budget for reacting to it and landing in the same block: everything a sniper would have to do — decide, sign, send, and reach the leader — has to fit inside this number. The slot's length is the measured one rather than mainnet's 400 ms, so the reading stays honest on a cluster that runs slower.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 5, "x": 5, "y": 64 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_duration_seconds_bucket{job=\"$job\"}[$__rate_interval]))) - histogram_quantile(0.5, sum by (le) (rate(sniper_watched_offset_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+          "legendFormat": "p50"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 3,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "#EAB839", "value": 0.05 },
+              { "color": "green", "value": 0.15 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      }
+    },
+    {
+      "id": 34,
+      "type": "stat",
+      "title": "Slot left, worst 5%",
+      "description": "The same budget in the slowest twentieth of cases. A sniper is judged on this rather than on the median: the trades worth taking are the ones nobody else got to, and those are exactly the ones that surfaced late.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 5, "x": 10, "y": 64 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_duration_seconds_bucket{job=\"$job\"}[$__rate_interval]))) - histogram_quantile(0.95, sum by (le) (rate(sniper_watched_offset_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+          "legendFormat": "p05"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 3,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "#EAB839", "value": 0.05 },
+              { "color": "green", "value": 0.15 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      }
+    },
+    {
+      "id": 35,
+      "type": "timeseries",
+      "title": "Watched wallet within the slot",
+      "description": "Where in the slot the wallet's transactions surface, measured from our own first shred of that slot. The slot's own length is drawn alongside: a quantile touching that line is a transaction that left no room to answer it in the same block. The gap between p50 and p99 is what a reaction budget has to survive.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 9, "x": 15, "y": 64 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_watched_offset_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(sniper_watched_offset_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(sniper_watched_offset_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+          "legendFormat": "p99"
+        },
+        {
+          "refId": "D",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_duration_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+          "legendFormat": "slot length"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "slot length" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "text" } },
+              { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [10, 10] } },
+              { "id": "custom.lineWidth", "value": 1 }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"] },
         "tooltip": { "mode": "multi", "sort": "desc" }
       }
     }

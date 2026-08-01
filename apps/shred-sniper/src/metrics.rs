@@ -46,6 +46,15 @@ const RECV_BATCH_BUCKETS: &[f64] = &[1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0];
 /// information: seeing 99% of a slot is a different animal from seeing 90%,
 /// while everything below half is equally broken.
 const RATIO_BUCKETS: &[f64] = &[0.5, 0.75, 0.9, 0.95, 0.99, 0.999, 1.0];
+/// A mainnet slot runs 400 ms, and the question here — how much of it is left
+/// once the transaction is in our hands — has to be answered inside that. The
+/// generic second buckets jump straight from 200 ms to 400 ms, which is the
+/// difference between a comfortable reaction and no reaction at all. The tail
+/// past 400 ms is coarse but present, because a test cluster runs its slots
+/// slower and without it every reading there piles into the overflow bucket.
+const SLOT_OFFSET_BUCKETS: &[f64] = &[
+    0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.75, 1.0, 1.5,
+];
 /// Delivery skew is signed, because our slot clock starts at whichever shred
 /// happened to reach us first rather than at the leader's slot boundary.
 const SKEW_BUCKETS: &[f64] = &[
@@ -108,6 +117,8 @@ pub struct Metrics {
     transactions_opaque: Counter<u64>,
     snipe_hits: Counter<u64>,
     snipe_latency: Histogram<f64>,
+    watched_transactions: Counter<u64>,
+    watched_offset: Histogram<f64>,
     slots: Counter<u64>,
     slots_unterminated: Counter<u64>,
     slot_completeness: Histogram<f64>,
@@ -358,6 +369,21 @@ impl Metrics {
                 .with_description("Time from the slot's first shred to a snipe hit being reported")
                 .with_boundaries(SECOND_BUCKETS.to_vec())
                 .build(),
+            watched_transactions: meter
+                .u64_counter("sniper.watched.transactions")
+                .with_unit("{transaction}")
+                .with_description("Transactions paid for by a watched wallet")
+                .build(),
+            watched_offset: meter
+                .f64_histogram("sniper.watched.offset")
+                .with_unit("s")
+                .with_description(
+                    "How far into the slot a watched wallet's transaction was before we could \
+                     see it; what is left of the slot after this is the whole budget for \
+                     reacting to it",
+                )
+                .with_boundaries(SLOT_OFFSET_BUCKETS.to_vec())
+                .build(),
             slots: meter
                 .u64_counter("sniper.slots")
                 .with_unit("{slot}")
@@ -527,8 +553,10 @@ impl Metrics {
 
     /// `slot_offset` is how far into the slot we were when this transaction
     /// surfaced. A hit is only worth anything if that number is small, so the
-    /// count alone never answers whether a snipe was actionable.
-    pub fn transaction(&self, vote: bool, hit: bool, opaque: bool, slot_offset: Duration) {
+    /// count alone never answers whether a snipe was actionable. It is `None`
+    /// for a transaction of a slot we are no longer anchored on, where there is
+    /// no start to measure from and a number would only be a flattering one.
+    pub fn transaction(&self, vote: bool, hit: bool, opaque: bool, slot_offset: Option<Duration>) {
         let attrs = if vote {
             &self.vote_attrs
         } else {
@@ -540,7 +568,20 @@ impl Metrics {
         }
         if hit {
             self.snipe_hits.add(1, &[]);
-            self.snipe_latency.record(slot_offset.as_secs_f64(), &[]);
+            if let Some(offset) = slot_offset {
+                self.snipe_latency.record(offset.as_secs_f64(), &[]);
+            }
+        }
+    }
+
+    /// A transaction the watched wallet paid for. The offset is the reason this
+    /// exists: reacting to the wallet means landing in what is left of the slot
+    /// after this, so the distribution of offsets is what says whether reacting
+    /// is possible at all — before a line of sending code is written.
+    pub fn watched_transaction(&self, slot_offset: Option<Duration>) {
+        self.watched_transactions.add(1, &[]);
+        if let Some(offset) = slot_offset {
+            self.watched_offset.record(offset.as_secs_f64(), &[]);
         }
     }
 
