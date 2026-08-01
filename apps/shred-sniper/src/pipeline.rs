@@ -3,6 +3,7 @@ use {
         config::Config,
         entries::Assembler,
         erasure::Recovery,
+        fire::{Fire, Firing},
         metrics::{Metrics, PacketKind},
         race,
         shred::{self, DataShred},
@@ -69,15 +70,36 @@ pub struct Pipeline {
     /// transactions is only possible with slot left to react in, so what these
     /// are here for is to time how much of it there is.
     watched: HashSet<Address>,
+    /// Our own fee payers. Kept apart from `watched` because a transaction of
+    /// ours is not something to react to — it is the answer to something we
+    /// already reacted to, coming back around.
+    searchers: HashSet<Address>,
     /// Present only when a wallet to watch is configured.
     race: Option<race::Tracker>,
+    /// Present only when there is a key to sign with.
+    fire: Option<Arc<Fire>>,
     shreds_seen: u64,
     slot: SlotState,
     started: Instant,
 }
 
 impl Pipeline {
-    pub fn new(config: &Config, shred_version: u16, metrics: Arc<Metrics>) -> Self {
+    pub fn new(
+        config: &Config,
+        shred_version: u16,
+        metrics: Arc<Metrics>,
+        firing: Option<Firing>,
+    ) -> Self {
+        // The address we sign with counts as one of ours whether or not it was
+        // also listed by hand, so arming the sniper is enough to have its own
+        // transactions recognised on the way back.
+        let mut searchers = config.searcher_wallets.clone();
+        if let Some(firing) = &firing
+            && !searchers.contains(&firing.searcher)
+        {
+            searchers.push(firing.searcher);
+        }
+
         Self {
             assembler: Assembler::new(config.retention, metrics.clone()),
             recovery: Recovery::new(config.retention, metrics.clone()),
@@ -87,7 +109,9 @@ impl Pipeline {
             snipe_program: config.snipe_program,
             sources: HashSet::new(),
             watched: config.target_wallets.iter().copied().collect(),
-            race: race::Tracker::new(&config.searcher_wallets, &config.target_wallets),
+            race: race::Tracker::new(&searchers, &config.target_wallets),
+            fire: firing.map(|firing| firing.fire),
+            searchers: searchers.into_iter().collect(),
             shreds_seen: 0,
             slot: SlotState::new(0),
             started: Instant::now(),
@@ -218,11 +242,27 @@ impl Pipeline {
 
         // The wallet being raced is known by who pays, not by what it calls: a
         // key further down the account list is not the sender.
-        if keys
-            .first()
-            .is_some_and(|payer| self.watched.contains(payer))
-        {
+        let payer = keys.first();
+        if payer.is_some_and(|payer| self.watched.contains(payer)) {
             self.metrics.watched_transaction(slot_offset);
+            // The clock the reaction is measured on starts here, at the first
+            // instant the trigger was knowable, rather than wherever the sender
+            // thread happens to pick it up.
+            if let Some(fire) = &self.fire
+                && let Some(signature) = transaction.signatures.first()
+            {
+                fire.trigger(slot, *signature, Instant::now());
+            }
+        }
+
+        // Our own answer, back around through the same turbine that carried the
+        // trigger. Matching it here is what closes the loop without asking the
+        // RPC whether the send worked.
+        if let Some(fire) = &self.fire
+            && payer.is_some_and(|payer| self.searchers.contains(payer))
+            && let Some(signature) = transaction.signatures.first()
+        {
+            fire.landed(signature, slot);
         }
 
         let vote = programs().any(|program| *program == self.vote_program);

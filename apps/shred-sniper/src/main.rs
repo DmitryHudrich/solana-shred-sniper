@@ -1,6 +1,9 @@
 mod config;
 mod entries;
 mod erasure;
+mod fire;
+mod keys;
+mod leaders;
 mod logs;
 mod metrics;
 mod netstat;
@@ -107,8 +110,15 @@ fn run(config: Config) -> Result<(), Box<dyn Error>> {
         exit.clone(),
         metrics.clone(),
     )?;
+    // Pointless without an exporter to publish through, so it follows the
+    // metrics switch as well as its own.
+    if config.leader_schedule_enabled && config.metrics_enabled {
+        leaders::spawn(config.rpc_url.clone(), metrics.clone(), exit.clone())?;
+    }
 
-    let mut pipeline = Pipeline::new(&config, shred_version, metrics.clone());
+    let firing = fire::spawn(&config, metrics.clone(), exit.clone())?;
+
+    let mut pipeline = Pipeline::new(&config, shred_version, metrics.clone(), firing);
     for batch in batches {
         metrics.queue_popped(batch.received().len() as u64);
         for packet in batch.received() {

@@ -37,7 +37,6 @@ for n in 1 2 3; do
   gen "v$n-stake"
 done
 gen faucet
-gen wallet-a
 
 solana-genesis \
   --ledger "$LEDGER" \

@@ -164,15 +164,30 @@ services:
       CHECK_DUPLICATE_INSTANCE: ${CHECK_DUPLICATE_INSTANCE:-true}
       GOSSIP_STATS_INTERVAL_SECS: ${GOSSIP_STATS_INTERVAL_SECS:-5}
       SLOT_RETENTION: ${SLOT_RETENTION:-64}
+      RPC_URL: ${RPC_URL:-http://172.28.0.11:8899}
+      LEADER_SCHEDULE_ENABLED: ${LEADER_SCHEDULE_ENABLED:-true}
       SNIPE_PROGRAM: ${SNIPE_PROGRAM:-}
       SEARCHER_WALLETS: ${SEARCHER_WALLETS:-}
       TARGET_WALLETS: ${TARGET_WALLETS:-}
+      # Who to watch, and what to answer with. Against a real cluster the
+      # target is an address and nothing more; here both keys live in the repo,
+      # so the file is the single place either wallet is defined and neither
+      # pubkey has to be copied into a second one.
+      TARGET_WALLET_FILES: ${TARGET_WALLET_FILES:-/wallets/wallet-a.json}
+      SEARCHER_KEYPAIR: ${SEARCHER_KEYPAIR:-/wallets/wallet-b.json}
+      MEMO_PROGRAM: ${MEMO_PROGRAM:-MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr}
+      FIRE_MEMO: ${FIRE_MEMO:-sniped}
+      FIRE_COOLDOWN_MS: ${FIRE_COOLDOWN_MS:-300}
+      BLOCKHASH_REFRESH_MS: ${BLOCKHASH_REFRESH_MS:-400}
       METRICS_ENABLED: ${METRICS_ENABLED:-true}
       LOGS_ENABLED: ${LOGS_ENABLED:-true}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-shred-sniper}
       METRICS_EXPORT_INTERVAL_SECS: ${METRICS_EXPORT_INTERVAL_SECS:-5}
       METRICS_EXPORT_TIMEOUT_SECS: ${METRICS_EXPORT_TIMEOUT_SECS:-5}
+    volumes:
+      - ../wallet-a.json:/wallets/wallet-a.json:ro
+      - ../wallet-b.json:/wallets/wallet-b.json:ro
     depends_on:
       validator1:
         condition: service_started
@@ -181,6 +196,25 @@ services:
     networks:
       solana:
         ipv4_address: 172.28.0.20
+
+  wallet-a:
+    <<: *image
+    restart: unless-stopped
+    entrypoint: ["/bin/bash", "/scripts/wallet-a.sh"]
+    environment:
+      RPC_URL: ${WALLET_A_RPC_URL:-http://172.28.0.11:8899}
+      INTERVAL: ${WALLET_A_INTERVAL:-5}
+      AMOUNT: ${WALLET_A_AMOUNT:-0.000001}
+    volumes:
+      - ./scripts:/scripts:ro
+      - ../wallet-a.json:/wallets/wallet-a.json:ro
+      - ../wallet-b.json:/wallets/wallet-b.json:ro
+    depends_on:
+      validator1:
+        condition: service_started
+    networks:
+      solana:
+        ipv4_address: 172.28.0.21
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.140.1

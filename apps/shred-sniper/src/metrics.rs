@@ -2,7 +2,7 @@ use {
     crate::config::Config,
     opentelemetry::{
         KeyValue, global,
-        metrics::{Counter, Histogram, Meter, ObservableCounter, ObservableGauge},
+        metrics::{Counter, Gauge, Histogram, Meter, ObservableCounter, ObservableGauge},
     },
     opentelemetry_otlp::{MetricExporter, Protocol, WithExportConfig},
     opentelemetry_sdk::{
@@ -60,6 +60,17 @@ const SLOT_OFFSET_BUCKETS: &[f64] = &[
 const SKEW_BUCKETS: &[f64] = &[
     -0.2, -0.1, -0.05, -0.02, -0.01, 0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.4,
 ];
+/// Reaction is the number the whole crate is built to produce: trigger seen to
+/// answer sent. Sub-millisecond at the bottom because everything before the
+/// send is ours to control and should be measurable when it is; a coarse tail
+/// past a slot because anything up there has already lost.
+const REACTION_BUCKETS: &[f64] = &[
+    0.000_1, 0.000_25, 0.000_5, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.4, 0.8,
+];
+/// How many slots after the trigger our answer was included in. Zero is the
+/// same slot, which on a real cluster only happens if the leader was still
+/// building it when we sent.
+const SLOTS_BEHIND_BUCKETS: &[f64] = &[0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 16.0, 32.0];
 
 #[derive(Clone, Copy)]
 pub enum PacketKind {
@@ -100,6 +111,11 @@ struct Gauges {
     /// the socket. Nothing else we measure moves when this does: an overflowing
     /// receive buffer looks precisely like a quiet network.
     udp_drops: AtomicU64,
+    /// Milliseconds since the blockhash the next fire would be signed with was
+    /// fetched. Every one of them is a slot the transaction no longer has to
+    /// land in, so a refresher that has quietly stalled shows up here before it
+    /// shows up as fires that never land.
+    blockhash_age_ms: AtomicU64,
 }
 
 pub struct Metrics {
@@ -119,8 +135,16 @@ pub struct Metrics {
     snipe_latency: Histogram<f64>,
     watched_transactions: Counter<u64>,
     watched_offset: Histogram<f64>,
+    fire_triggers: Counter<u64>,
+    fire_sends: Counter<u64>,
+    fire_reaction: Histogram<f64>,
+    fire_send: Histogram<f64>,
+    fire_landed: Counter<u64>,
+    fire_round_trip: Histogram<f64>,
+    fire_slots_behind: Histogram<u64>,
     slots: Counter<u64>,
     slots_unterminated: Counter<u64>,
+    slot_leader: Gauge<u64>,
     slot_completeness: Histogram<f64>,
     delivery_skew: Histogram<f64>,
     pool_exhausted: Counter<u64>,
@@ -141,6 +165,31 @@ pub struct Metrics {
     user_attrs: [KeyValue; 1],
     batch_attrs: [Vec<KeyValue>; 3],
     recovery_attrs: [Vec<KeyValue>; 2],
+    fire_attrs: [Vec<KeyValue>; 4],
+    landed_attrs: [Vec<KeyValue>; 2],
+}
+
+/// Why a trigger did not turn into a transaction on the wire — or that it did.
+#[derive(Clone, Copy)]
+enum FireOutcome {
+    Sent,
+    /// The RPC refused it or never answered.
+    Failed,
+    /// Inside the cooldown of the fire before it.
+    Skipped,
+    /// The send queue was full, so the packet path let it go rather than wait.
+    Dropped,
+}
+
+impl FireOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Sent => "sent",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+            Self::Dropped => "dropped",
+        }
+    }
 }
 
 pub struct MetricsGuard {
@@ -271,6 +320,14 @@ impl Metrics {
                 gauges.clone(),
                 |gauges| gauges.buffered_slots.load(Ordering::Relaxed),
             ),
+            observable(
+                meter,
+                "sniper.blockhash.age",
+                "ms",
+                "Age of the blockhash the next fire would be signed with",
+                gauges.clone(),
+                |gauges| gauges.blockhash_age_ms.load(Ordering::Relaxed),
+            ),
         ];
 
         let udp_drops = {
@@ -384,10 +441,72 @@ impl Metrics {
                 )
                 .with_boundaries(SLOT_OFFSET_BUCKETS.to_vec())
                 .build(),
+            fire_triggers: meter
+                .u64_counter("sniper.fire.triggers")
+                .with_unit("{transaction}")
+                .with_description(
+                    "Watched-wallet transactions handed to the sender; every one of these is an \
+                     answer the sniper decided to send",
+                )
+                .build(),
+            fire_sends: meter
+                .u64_counter("sniper.fire.sends")
+                .with_unit("{transaction}")
+                .with_description("What became of each trigger, by outcome")
+                .build(),
+            fire_reaction: meter
+                .f64_histogram("sniper.fire.reaction")
+                .with_unit("s")
+                .with_description(
+                    "From the watched wallet's transaction surfacing out of the shreds to our own \
+                     being away — the whole of what the sniper controls",
+                )
+                .with_boundaries(REACTION_BUCKETS.to_vec())
+                .build(),
+            fire_send: meter
+                .f64_histogram("sniper.fire.send")
+                .with_unit("s")
+                .with_description(
+                    "The send call alone, which is the share of the reaction that belongs to the \
+                     network rather than to us",
+                )
+                .with_boundaries(REACTION_BUCKETS.to_vec())
+                .build(),
+            fire_landed: meter
+                .u64_counter("sniper.fire.landed")
+                .with_unit("{transaction}")
+                // Not asked of the RPC: our own transaction comes back to us
+                // over turbine like everybody else's, so being included is
+                // something the sniper can see for itself.
+                .with_description("Sent transactions seen coming back in a block, by outcome")
+                .build(),
+            fire_round_trip: meter
+                .f64_histogram("sniper.fire.round_trip")
+                .with_unit("s")
+                .with_description("From our transaction being sent to seeing it in a block")
+                .with_boundaries(SECOND_BUCKETS.to_vec())
+                .build(),
+            fire_slots_behind: meter
+                .u64_histogram("sniper.fire.slots_behind")
+                .with_unit("{slot}")
+                .with_description(
+                    "Slots between the one the trigger was seen in and the one our answer landed \
+                     in",
+                )
+                .with_boundaries(SLOTS_BEHIND_BUCKETS.to_vec())
+                .build(),
             slots: meter
                 .u64_counter("sniper.slots")
                 .with_unit("{slot}")
                 .with_description("Slots observed on the wire")
+                .build(),
+            slot_leader: meter
+                .u64_gauge("sniper.slot.leader")
+                .with_unit("{leader}")
+                .with_description(
+                    "1 for the validator leading the slot currently on the wire, 0 for everyone \
+                     else in the fetched schedule window",
+                )
                 .build(),
             slots_unterminated: meter
                 .u64_counter("sniper.slots.unterminated")
@@ -469,6 +588,16 @@ impl Metrics {
             recovery_attrs: [
                 vec![KeyValue::new("recovered", false)],
                 vec![KeyValue::new("recovered", true)],
+            ],
+            fire_attrs: [
+                vec![KeyValue::new("outcome", FireOutcome::Sent.as_str())],
+                vec![KeyValue::new("outcome", FireOutcome::Failed.as_str())],
+                vec![KeyValue::new("outcome", FireOutcome::Skipped.as_str())],
+                vec![KeyValue::new("outcome", FireOutcome::Dropped.as_str())],
+            ],
+            landed_attrs: [
+                vec![KeyValue::new("outcome", "landed")],
+                vec![KeyValue::new("outcome", "lost")],
             ],
         }
     }
@@ -585,6 +714,63 @@ impl Metrics {
         }
     }
 
+    /// A trigger the packet path managed to hand over. Counted separately from
+    /// the outcomes below so that "we saw it and let it go" and "we saw it and
+    /// tried" never end up in the same number.
+    pub fn fire_triggered(&self) {
+        self.fire_triggers.add(1, &[]);
+    }
+
+    fn fire_outcome(&self, outcome: FireOutcome) {
+        let attrs = match outcome {
+            FireOutcome::Sent => &self.fire_attrs[0],
+            FireOutcome::Failed => &self.fire_attrs[1],
+            FireOutcome::Skipped => &self.fire_attrs[2],
+            FireOutcome::Dropped => &self.fire_attrs[3],
+        };
+        self.fire_sends.add(1, attrs);
+    }
+
+    /// `reaction` covers everything from the trigger being knowable; `send` is
+    /// the part of it spent in the call. The difference between the two is the
+    /// only share we can do anything about.
+    pub fn fire_sent(&self, reaction: Duration, send: Duration) {
+        self.fire_outcome(FireOutcome::Sent);
+        self.fire_reaction.record(reaction.as_secs_f64(), &[]);
+        self.fire_send.record(send.as_secs_f64(), &[]);
+    }
+
+    pub fn fire_failed(&self) {
+        self.fire_outcome(FireOutcome::Failed);
+    }
+
+    pub fn fire_skipped(&self) {
+        self.fire_outcome(FireOutcome::Skipped);
+    }
+
+    pub fn fire_dropped(&self) {
+        self.fire_outcome(FireOutcome::Dropped);
+    }
+
+    pub fn fire_landed(&self, round_trip: Duration, slots_behind: u64) {
+        self.fire_landed.add(1, &self.landed_attrs[0]);
+        self.fire_round_trip.record(round_trip.as_secs_f64(), &[]);
+        self.fire_slots_behind.record(slots_behind, &[]);
+    }
+
+    /// Sent, and never seen in a block. Its own outcome rather than silence,
+    /// because a landing rate computed from sends alone cannot tell a
+    /// transaction that is still in flight from one that was dropped.
+    pub fn fire_lost(&self) {
+        self.fire_landed.add(1, &self.landed_attrs[1]);
+    }
+
+    pub fn set_blockhash_age(&self, age: Duration) {
+        self.gauges
+            .blockhash_age_ms
+            .store(age.as_millis() as u64, Ordering::Relaxed);
+    }
+
     pub fn slot_completed(
         &self,
         slot: u64,
@@ -599,6 +785,22 @@ impl Metrics {
         }
         self.slot_shreds.record(shreds, &[]);
         self.slot_transactions.record(transactions, &[]);
+    }
+
+    /// The zeros matter as much as the one: the collector keeps serving a
+    /// series it stopped hearing about at its last value, so a leader that
+    /// rotates out has to be written down as not leading rather than simply
+    /// dropped.
+    pub fn slot_leader(&self, leader: &str, leading: bool) {
+        self.slot_leader.record(
+            u64::from(leading),
+            &[KeyValue::new("leader", leader.to_string())],
+        );
+    }
+
+    /// Highest slot seen on the wire, as [`Self::slot_completed`] left it.
+    pub fn current_slot(&self) -> u64 {
+        self.gauges.current_slot.load(Ordering::Relaxed)
     }
 
     pub fn set_tvu_peers(&self, peers: u64) {

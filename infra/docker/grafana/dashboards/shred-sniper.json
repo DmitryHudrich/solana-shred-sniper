@@ -1,1360 +1,3248 @@
 {
-  "uid": "shred-sniper",
-  "title": "Shred Sniper",
-  "tags": ["solana", "sniper"],
-  "timezone": "browser",
-  "schemaVersion": 41,
-  "version": 1,
-  "editable": true,
-  "refresh": "5s",
-  "time": { "from": "now-15m", "to": "now" },
-  "templating": {
-    "list": [
-      {
-        "name": "job",
-        "label": "Sniper",
-        "type": "query",
-        "datasource": { "type": "prometheus", "uid": "prometheus" },
-        "query": "label_values(sniper_packets_received_total, job)",
-        "refresh": 1,
-        "includeAll": false,
-        "multi": false,
-        "current": { "text": "shred-sniper", "value": "shred-sniper" }
-      }
-    ]
-  },
-  "panels": [
-    {
-      "id": 1,
-      "type": "stat",
-      "title": "Network TPS (non-vote)",
-      "description": "Transactions per second decoded from turbine shreds, excluding votes. This is what the cluster is actually processing, seen before the block is confirmed.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 5, "w": 5, "x": 0, "y": 0 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(sniper_transactions_total{job=\"$job\", kind=\"user\"}[$__rate_interval]))",
-          "legendFormat": "tps"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "suffix:tx/s",
-          "decimals": 0,
-          "color": { "mode": "fixed", "fixedColor": "text" },
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
-        },
-        "overrides": []
-      },
-      "options": {
-        "graphMode": "area",
-        "colorMode": "value",
-        "justifyMode": "auto",
-        "textMode": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
-      }
+ "uid": "shred-sniper",
+ "title": "Shred Sniper",
+ "tags": [
+  "solana",
+  "sniper"
+ ],
+ "timezone": "browser",
+ "schemaVersion": 41,
+ "version": 2,
+ "editable": true,
+ "refresh": "5s",
+ "time": {
+  "from": "now-15m",
+  "to": "now"
+ },
+ "templating": {
+  "list": [
+   {
+    "name": "job",
+    "label": "Sniper",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
     },
-    {
-      "id": 2,
-      "type": "stat",
-      "title": "Vote TPS",
-      "description": "Vote transactions per second. Solana's headline TPS number usually includes these.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 5, "w": 5, "x": 5, "y": 0 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(sniper_transactions_total{job=\"$job\", kind=\"vote\"}[$__rate_interval]))",
-          "legendFormat": "vote tps"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "suffix:tx/s",
-          "decimals": 0,
-          "color": { "mode": "fixed", "fixedColor": "text" },
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
-        },
-        "overrides": []
-      },
-      "options": {
-        "graphMode": "area",
-        "colorMode": "value",
-        "textMode": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
-      }
-    },
-    {
-      "id": 3,
-      "type": "stat",
-      "title": "Block time",
-      "description": "Seconds per slot, measured from the arrival of the first shred of each slot.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 5, "w": 5, "x": 10, "y": 0 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "1 / clamp_min(sum(rate(sniper_slots_total{job=\"$job\"}[$__rate_interval])), 0.001)",
-          "legendFormat": "block time"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "decimals": 2,
-          "color": { "mode": "thresholds" },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "#EAB839", "value": 1 },
-              { "color": "red", "value": 2 }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "graphMode": "area",
-        "colorMode": "value",
-        "textMode": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
-      }
-    },
-    {
-      "id": 4,
-      "type": "stat",
-      "title": "Current slot",
-      "description": "Highest slot seen on the wire.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 5, "w": 3, "x": 15, "y": 0 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "max(sniper_slot_current{job=\"$job\"})",
-          "legendFormat": "slot"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "decimals": 0,
-          "color": { "mode": "fixed", "fixedColor": "text" },
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
-        },
-        "overrides": []
-      },
-      "options": {
-        "graphMode": "none",
-        "colorMode": "value",
-        "textMode": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
-      }
-    },
-    {
-      "id": 5,
-      "type": "stat",
-      "title": "Turbine peers",
-      "description": "Peers seen in gossip that can relay to us, and peers actually sending us shreds. Zero senders means we are not in the turbine tree.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 5, "w": 3, "x": 18, "y": 0 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "max(sniper_gossip_tvu_peers{job=\"$job\"})",
-          "legendFormat": "gossip"
-        },
-        {
-          "refId": "B",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "max(sniper_turbine_sources{job=\"$job\"})",
-          "legendFormat": "sending"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "decimals": 0,
-          "color": { "mode": "thresholds" },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "red", "value": null },
-              { "color": "green", "value": 1 }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "graphMode": "none",
-        "colorMode": "value",
-        "textMode": "value_and_name",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
-      }
-    },
-    {
-      "id": 6,
-      "type": "stat",
-      "title": "Shred loss",
-      "description": "Share of data shreds never received before their slot aged out, out of every shred the slot should have had. Erasure-recovered shreds count as received, so this is the loss that survived recovery: anything above zero means the TPS and transaction feed are undercounting. What turbine dropped before recovery is on 'Shred loss before and after recovery'.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 5, "w": 3, "x": 21, "y": 0 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "(sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0)) / clamp_min(sum(rate(sniper_shreds_received_total{job=\"$job\"}[$__rate_interval])) + (sum(rate(sniper_shreds_recovered_total{job=\"$job\"}[$__rate_interval])) or vector(0)) + (sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0)), 0.001)",
-          "legendFormat": "loss"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "decimals": 2,
-          "color": { "mode": "thresholds" },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "#EAB839", "value": 0.001 },
-              { "color": "red", "value": 0.01 }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "graphMode": "area",
-        "colorMode": "value",
-        "textMode": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
-      }
-    },
-    {
-      "id": 10,
-      "type": "timeseries",
-      "title": "Transactions per second",
-      "description": "Throughput observed on the wire, split by kind. Non-vote is the number that matters for a sniper.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(sniper_transactions_total{job=\"$job\", kind=\"user\"}[$__rate_interval]))",
-          "legendFormat": "non-vote"
-        },
-        {
-          "refId": "B",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(sniper_transactions_total{job=\"$job\", kind=\"vote\"}[$__rate_interval]))",
-          "legendFormat": "vote"
-        },
-        {
-          "refId": "C",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(sniper_entries_total{job=\"$job\"}[$__rate_interval]))",
-          "legendFormat": "entries"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "suffix:/s",
-          "decimals": 0,
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true,
-            "axisSoftMin": 0
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": ["lastNotNull", "max"]
-        },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
-    },
-    {
-      "id": 11,
-      "type": "timeseries",
-      "title": "Entry availability latency",
-      "description": "Time from a batch's first shred landing on our socket to its transactions being decoded. This is the head start over RPC.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_batch_latency_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p50"
-        },
-        {
-          "refId": "B",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(sniper_batch_latency_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p95"
-        },
-        {
-          "refId": "C",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(sniper_batch_latency_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p99"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 0,
-            "showPoints": "never",
-            "spanNulls": true,
-            "axisSoftMin": 0
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": ["lastNotNull", "max"]
-        },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
-    },
-    {
-      "id": 12,
-      "type": "timeseries",
-      "title": "Turbine ingest",
-      "description": "Datagrams read from the TVU sockets, and how they split between usable data shreds and everything else (coding shreds, repair traffic, junk).",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(sniper_packets_received_total{job=\"$job\"}[$__rate_interval]))",
-          "legendFormat": "packets"
-        },
-        {
-          "refId": "B",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(sniper_shreds_received_total{job=\"$job\"}[$__rate_interval]))",
-          "legendFormat": "data shreds"
-        },
-        {
-          "refId": "C",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(sniper_packets_rejected_total{job=\"$job\"}[$__rate_interval]))",
-          "legendFormat": "not data shreds"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "suffix:/s",
-          "decimals": 0,
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true,
-            "axisSoftMin": 0
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": ["lastNotNull"]
-        },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
-    },
-    {
-      "id": 13,
-      "type": "timeseries",
-      "title": "Shred loss and duplicates",
-      "description": "Shreds that never arrived before their slot aged out, and shreds delivered more than once by the turbine tree.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
-          "legendFormat": "missing"
-        },
-        {
-          "refId": "B",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(sniper_shreds_duplicate_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
-          "legendFormat": "duplicate"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "suffix:/s",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true,
-            "axisSoftMin": 0
-          }
-        },
-        "overrides": [
-          {
-            "matcher": { "id": "byName", "options": "missing" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": ["lastNotNull", "max"]
-        },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
-    },
-    {
-      "id": 14,
-      "type": "timeseries",
-      "title": "Slot duration",
-      "description": "Distribution of wall time between consecutive slots, as seen from the shreds.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 21 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_duration_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p50"
-        },
-        {
-          "refId": "B",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(sniper_slot_duration_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p95"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 0,
-            "showPoints": "never",
-            "spanNulls": true,
-            "axisSoftMin": 0
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": ["lastNotNull"]
-        },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
-    },
-    {
-      "id": 15,
-      "type": "timeseries",
-      "title": "Pipeline backlog",
-      "description": "Packets waiting to be parsed, slots held in the assembler, and per-packet parse time. A growing queue means the parser is falling behind the sockets.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 21 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "max(sniper_queue_depth{job=\"$job\"})",
-          "legendFormat": "queued packets"
-        },
-        {
-          "refId": "B",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "max(sniper_slots_buffered{job=\"$job\"})",
-          "legendFormat": "buffered slots"
-        },
-        {
-          "refId": "C",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(sniper_packet_latency_seconds_bucket{job=\"$job\"}[$__rate_interval]))) * 1000",
-          "legendFormat": "parse p99 (ms)"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "decimals": 1,
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 0,
-            "showPoints": "never",
-            "spanNulls": true,
-            "axisSoftMin": 0
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": ["lastNotNull", "max"]
-        },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
-    },
-    {
-      "id": 16,
-      "type": "timeseries",
-      "title": "Batches and snipe hits",
-      "description": "Entry batches reassembled per second by outcome, plus transactions matching SNIPE_PROGRAM. Sustained 'failed' means the shred layout drifted.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 21 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum by (outcome) (rate(sniper_batches_total{job=\"$job\"}[$__rate_interval]))",
-          "legendFormat": "{{outcome}}"
-        },
-        {
-          "refId": "B",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(sniper_snipe_hits_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
-          "legendFormat": "snipe hits"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "suffix:/s",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true,
-            "axisSoftMin": 0
-          }
-        },
-        "overrides": [
-          {
-            "matcher": { "id": "byName", "options": "failed" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }]
-          },
-          {
-            "matcher": { "id": "byName", "options": "snipe hits" },
-            "properties": [
-              { "id": "color", "value": { "mode": "fixed", "fixedColor": "purple" } },
-              { "id": "custom.lineWidth", "value": 3 }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": ["lastNotNull"]
-        },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
-    },
-    {
-      "id": 20,
-      "type": "stat",
-      "title": "Slot coverage",
-      "description": "Median share of a slot's data shreds we actually saw, measured against the count the slot's closing shred declares. This is the product: everything downstream can only be as complete as this.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 5, "w": 5, "x": 0, "y": 28 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_completeness_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p50"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "decimals": 2,
-          "color": { "mode": "thresholds" },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "red", "value": null },
-              { "color": "#EAB839", "value": 0.95 },
-              { "color": "green", "value": 0.99 }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "graphMode": "area",
-        "colorMode": "value",
-        "textMode": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
-      }
-    },
-    {
-      "id": 21,
-      "type": "stat",
-      "title": "Kernel drops",
-      "description": "Datagrams the kernel discarded before we could read them. Nothing else on this dashboard moves when this does: an overflowing receive buffer looks exactly like a quiet network.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 5, "w": 5, "x": 5, "y": 28 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(sniper_udp_drops_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
-          "legendFormat": "drops"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "pps",
-          "decimals": 2,
-          "color": { "mode": "thresholds" },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "#EAB839", "value": 0.001 },
-              { "color": "red", "value": 1 }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "graphMode": "area",
-        "colorMode": "value",
-        "textMode": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
-      }
-    },
-    {
-      "id": 22,
-      "type": "stat",
-      "title": "Opaque transactions",
-      "description": "Share of transactions reaching programs through an address lookup table. We cannot resolve those, so a snipe target behind one is missed rather than misreported: this is the size of that blind spot.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 5, "w": 4, "x": 10, "y": 28 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "(sum(rate(sniper_transactions_opaque_total{job=\"$job\"}[$__rate_interval])) or vector(0)) / clamp_min(sum(rate(sniper_transactions_total{job=\"$job\"}[$__rate_interval])), 0.001)",
-          "legendFormat": "opaque"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "decimals": 2,
-          "color": { "mode": "thresholds" },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "#EAB839", "value": 0.2 }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "graphMode": "area",
-        "colorMode": "value",
-        "textMode": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
-      }
-    },
-    {
-      "id": 23,
-      "type": "timeseries",
-      "title": "Snipe latency within slot",
-      "description": "How far into the slot we were when a snipe hit surfaced, measured from the slot's first shred. A hit at 350 ms of a 400 ms slot is worthless; the count of hits alone never says which kind we got.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 5, "w": 10, "x": 14, "y": 28 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_snipe_latency_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p50"
-        },
-        {
-          "refId": "B",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(sniper_snipe_latency_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p95"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 0,
-            "showPoints": "never",
-            "spanNulls": true,
-            "axisSoftMin": 0
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
-    },
-    {
-      "id": 24,
-      "type": "timeseries",
-      "title": "Slot coverage distribution",
-      "description": "Coverage across slots. The low quantiles are the interesting ones: a p50 of 100% with a p01 of 80% means a fifth of some slots is routinely invisible to us.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 33 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_completeness_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p50"
-        },
-        {
-          "refId": "B",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.1, sum by (le) (rate(sniper_slot_completeness_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p10"
-        },
-        {
-          "refId": "C",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.01, sum by (le) (rate(sniper_slot_completeness_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p01"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 0,
-            "showPoints": "never",
-            "spanNulls": true,
-            "axisSoftMax": 1
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
-    },
-    {
-      "id": 25,
-      "type": "timeseries",
-      "title": "Delivery skew vs leader clock",
-      "description": "Arrival offset within the slot minus the offset the leader stamped into the shred's reference tick. The two clocks share no origin, so the absolute value means nothing — the spread is turbine delivery jitter, and widening is what to watch.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 33 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_delivery_skew_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p50"
-        },
-        {
-          "refId": "B",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(sniper_delivery_skew_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p95"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 0,
-            "showPoints": "never",
-            "spanNulls": true
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
-    },
-    {
-      "id": 26,
-      "type": "timeseries",
-      "title": "Ingest pressure",
-      "description": "Early warning, in the order it fires: the queue peak rises first, then receivers start allocating because the parser has not returned a batch, and only then does the kernel begin dropping. Slots without a closing shred ride along as a coverage caveat.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 33 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "max(sniper_queue_depth_peak{job=\"$job\"})",
-          "legendFormat": "queue peak"
-        },
-        {
-          "refId": "B",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(sniper_pool_exhausted_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
-          "legendFormat": "pool exhausted/s"
-        },
-        {
-          "refId": "C",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(sniper_udp_drops_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
-          "legendFormat": "kernel drops/s"
-        },
-        {
-          "refId": "D",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(sniper_slots_unterminated_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
-          "legendFormat": "unterminated slots/s"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 0,
-            "showPoints": "never",
-            "spanNulls": true,
-            "axisSoftMin": 0
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
-    },
-    {
-      "id": 27,
-      "type": "timeseries",
-      "title": "Batch latency by path",
-      "description": "Entry batch latency split by whether the batch had to wait on erasure recovery. The gap between the two lines is what recovery costs us in time, as opposed to what it saves us in shreds.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 40 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le, recovered) (rate(sniper_batch_latency_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p95 recovered={{recovered}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 0,
-            "showPoints": "never",
-            "spanNulls": true,
-            "axisSoftMin": 0
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
-    },
-    {
-      "id": 28,
-      "type": "timeseries",
-      "title": "Read batching",
-      "description": "Datagrams returned per recvmmsg call. Piled up at one means the syscall amortizes nothing and the socket is idle between packets; mass at 64 means we are reading at line rate.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 40 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_recv_batch_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p50"
-        },
-        {
-          "refId": "B",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(sniper_recv_batch_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p95"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 0,
-            "showPoints": "never",
-            "spanNulls": true,
-            "axisSoftMin": 0
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
-    },
-    {
-      "id": 29,
-      "type": "timeseries",
-      "title": "Erasure recovery",
-      "description": "Data shreds rebuilt from their erasure batch, against the ones that stayed lost and the batches that could not be repaired at all. Recovery is the only thing standing between turbine dropping a shred and us never seeing its transactions: without it, 'recovered' would be added to 'still missing'.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 47 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(sniper_shreds_recovered_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
-          "legendFormat": "recovered"
-        },
-        {
-          "refId": "B",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
-          "legendFormat": "still missing"
-        },
-        {
-          "refId": "C",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(sniper_fec_sets_incomplete_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
-          "legendFormat": "unrecoverable batches"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "suffix:/s",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true,
-            "axisSoftMin": 0
-          }
-        },
-        "overrides": [
-          {
-            "matcher": { "id": "byName", "options": "recovered" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }]
-          },
-          {
-            "matcher": { "id": "byName", "options": "still missing" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }]
-          },
-          {
-            "matcher": { "id": "byName", "options": "unrecoverable batches" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }]
-          }
-        ]
-      },
-      "options": {
-        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
-    },
-    {
-      "id": 30,
-      "type": "timeseries",
-      "title": "Shred loss before and after recovery",
-      "description": "What turbine failed to deliver, and what was still missing once Reed-Solomon had done its work. Both are measured against every data shred the slot should have had, so the gap between the lines is exactly what recovery bought us. Note this differs from the 'Shred loss' stat above, which leaves recovered shreds out of its denominator.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 47 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "((sum(rate(sniper_shreds_recovered_total{job=\"$job\"}[$__rate_interval])) or vector(0)) + (sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0))) / clamp_min(sum(rate(sniper_shreds_received_total{job=\"$job\"}[$__rate_interval])) + (sum(rate(sniper_shreds_recovered_total{job=\"$job\"}[$__rate_interval])) or vector(0)) + (sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0)), 0.001)",
-          "legendFormat": "turbine loss"
-        },
-        {
-          "refId": "B",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "(sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0)) / clamp_min(sum(rate(sniper_shreds_received_total{job=\"$job\"}[$__rate_interval])) + (sum(rate(sniper_shreds_recovered_total{job=\"$job\"}[$__rate_interval])) or vector(0)) + (sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0)), 0.001)",
-          "legendFormat": "after recovery"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "decimals": 2,
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 0,
-            "showPoints": "never",
-            "spanNulls": true,
-            "axisSoftMin": 0
-          }
-        },
-        "overrides": [
-          {
-            "matcher": { "id": "byName", "options": "turbine loss" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }]
-          },
-          {
-            "matcher": { "id": "byName", "options": "after recovery" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }]
-          }
-        ]
-      },
-      "options": {
-        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
-    },
-    {
-      "id": 31,
-      "type": "table",
-      "title": "Bot vs wallet, by slot",
-      "description": "One row per slot where either side traded. tx_gap is how many transactions separate the bot from the wallet inside the block. Reacting to a transaction can only land behind it, so a bot that snipes this wallet has a positive gap and small is good; a negative one means the bot fired on its own rather than in response. same_entry means the two share an entry, and transactions of one entry execute in parallel — the gap is still real but it does not order them. exact is false when a batch we never decoded sits between the two, which makes the count short by whatever it held. Until the bot exists, every row carries the wallet's signature alone, which is the baseline it will be judged against.",
-      "datasource": { "type": "loki", "uid": "loki" },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 54 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "loki", "uid": "loki" },
-          "expr": "{service_name=\"shred-sniper\"} |= `race`",
-          "queryType": "range",
-          "maxLines": 500
-        }
-      ],
-      "transformations": [
-        {
-          "id": "extractFields",
-          "options": { "source": "labels", "format": "json", "replace": false, "keepTime": true }
-        },
-        {
-          "id": "convertFieldType",
-          "options": {
-            "conversions": [
-              { "targetField": "tx_gap", "destinationType": "number" },
-              { "targetField": "entry_gap", "destinationType": "number" },
-              { "targetField": "slot", "destinationType": "number" }
-            ]
-          }
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Line": true,
-              "labels": true,
-              "labelTypes": true,
-              "tsNs": true,
-              "id": true,
-              "detected_level": true,
-              "scope_name": true,
-              "service_name": true,
-              "service_version": true,
-              "severity_number": true,
-              "severity_text": true,
-              "telemetry_sdk_language": true,
-              "telemetry_sdk_name": true,
-              "telemetry_sdk_version": true
-            },
-            "indexByName": {
-              "Time": 0,
-              "slot": 1,
-              "tx_gap": 2,
-              "entry_gap": 3,
-              "same_entry": 4,
-              "exact": 5,
-              "searcher": 6,
-              "target": 7
-            },
-            "renameByName": {
-              "searcher": "bot signature",
-              "target": "wallet signature"
-            }
-          }
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": { "align": "left", "cellOptions": { "type": "auto" }, "filterable": true }
-        },
-        "overrides": [
-          {
-            "matcher": { "id": "byName", "options": "tx_gap" },
-            "properties": [
-              { "id": "custom.cellOptions", "value": { "type": "color-text" } },
-              { "id": "custom.align", "value": "right" },
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    { "color": "text", "value": null },
-                    { "color": "green", "value": 0 },
-                    { "color": "#EAB839", "value": 25 },
-                    { "color": "red", "value": 100 }
-                  ]
-                }
-              }
-            ]
-          },
-          {
-            "matcher": { "id": "byName", "options": "entry_gap" },
-            "properties": [{ "id": "custom.align", "value": "right" }]
-          },
-          {
-            "matcher": { "id": "byName", "options": "exact" },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "value",
-                    "options": { "false": { "color": "orange", "index": 0, "text": "false" } }
-                  }
-                ]
-              },
-              { "id": "custom.cellOptions", "value": { "type": "color-text" } }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "showHeader": true,
-        "cellHeight": "sm",
-        "footer": { "show": false, "reducer": ["sum"], "countRows": false, "fields": "" },
-        "sortBy": [{ "displayName": "Time", "desc": true }]
-      }
-    },
-    {
-      "id": 32,
-      "type": "stat",
-      "title": "Watched wallet",
-      "description": "Transactions per second paid for by a wallet in TARGET_WALLETS. Zero means either the wallet is idle or the address is wrong — nothing else on this row can be read until this one moves.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 6, "w": 5, "x": 0, "y": 64 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(sniper_watched_transactions_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
-          "legendFormat": "tx/s"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "suffix:tx/s",
-          "decimals": 2,
-          "color": { "mode": "fixed", "fixedColor": "text" },
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
-        },
-        "overrides": []
-      },
-      "options": {
-        "graphMode": "area",
-        "colorMode": "value",
-        "textMode": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
-      }
-    },
-    {
-      "id": 33,
-      "type": "stat",
-      "title": "Slot left, typical",
-      "description": "What is left of the slot by the time the wallet's transaction is decoded here. This is the entire budget for reacting to it and landing in the same block: everything a sniper would have to do — decide, sign, send, and reach the leader — has to fit inside this number. The slot's length is the measured one rather than mainnet's 400 ms, so the reading stays honest on a cluster that runs slower.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 6, "w": 5, "x": 5, "y": 64 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_duration_seconds_bucket{job=\"$job\"}[$__rate_interval]))) - histogram_quantile(0.5, sum by (le) (rate(sniper_watched_offset_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p50"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "decimals": 3,
-          "color": { "mode": "thresholds" },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "red", "value": null },
-              { "color": "#EAB839", "value": 0.05 },
-              { "color": "green", "value": 0.15 }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "graphMode": "area",
-        "colorMode": "value",
-        "textMode": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
-      }
-    },
-    {
-      "id": 34,
-      "type": "stat",
-      "title": "Slot left, worst 5%",
-      "description": "The same budget in the slowest twentieth of cases. A sniper is judged on this rather than on the median: the trades worth taking are the ones nobody else got to, and those are exactly the ones that surfaced late.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 6, "w": 5, "x": 10, "y": 64 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_duration_seconds_bucket{job=\"$job\"}[$__rate_interval]))) - histogram_quantile(0.95, sum by (le) (rate(sniper_watched_offset_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p05"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "decimals": 3,
-          "color": { "mode": "thresholds" },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "red", "value": null },
-              { "color": "#EAB839", "value": 0.05 },
-              { "color": "green", "value": 0.15 }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "graphMode": "area",
-        "colorMode": "value",
-        "textMode": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
-      }
-    },
-    {
-      "id": 35,
-      "type": "timeseries",
-      "title": "Watched wallet within the slot",
-      "description": "Where in the slot the wallet's transactions surface, measured from our own first shred of that slot. The slot's own length is drawn alongside: a quantile touching that line is a transaction that left no room to answer it in the same block. The gap between p50 and p99 is what a reaction budget has to survive.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 6, "w": 9, "x": 15, "y": 64 },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_watched_offset_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p50"
-        },
-        {
-          "refId": "B",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(sniper_watched_offset_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p95"
-        },
-        {
-          "refId": "C",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(sniper_watched_offset_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p99"
-        },
-        {
-          "refId": "D",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_duration_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "slot length"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 0,
-            "showPoints": "never",
-            "spanNulls": true,
-            "axisSoftMin": 0
-          }
-        },
-        "overrides": [
-          {
-            "matcher": { "id": "byName", "options": "slot length" },
-            "properties": [
-              { "id": "color", "value": { "mode": "fixed", "fixedColor": "text" } },
-              { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [10, 10] } },
-              { "id": "custom.lineWidth", "value": 1 }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
+    "query": "label_values(sniper_packets_received_total, job)",
+    "refresh": 1,
+    "includeAll": false,
+    "multi": false,
+    "current": {
+     "text": "shred-sniper",
+     "value": "shred-sniper"
     }
+   }
   ]
+ },
+ "panels": [
+  {
+   "id": 1,
+   "type": "stat",
+   "title": "Network TPS (non-vote)",
+   "description": "Transactions per second decoded from turbine shreds, excluding votes. This is what the cluster is actually processing, seen before the block is confirmed.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 5,
+    "x": 0,
+    "y": 0
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(sniper_transactions_total{job=\"$job\", kind=\"user\"}[$__rate_interval]))",
+     "legendFormat": "tps"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "suffix:tx/s",
+     "decimals": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "text"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "text",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "graphMode": "area",
+    "colorMode": "value",
+    "justifyMode": "auto",
+    "textMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
+   "id": 2,
+   "type": "stat",
+   "title": "Vote TPS",
+   "description": "Vote transactions per second. Solana's headline TPS number usually includes these.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 5,
+    "x": 5,
+    "y": 0
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(sniper_transactions_total{job=\"$job\", kind=\"vote\"}[$__rate_interval]))",
+     "legendFormat": "vote tps"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "suffix:tx/s",
+     "decimals": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "text"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "text",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "graphMode": "area",
+    "colorMode": "value",
+    "textMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
+   "id": 3,
+   "type": "stat",
+   "title": "Block time",
+   "description": "Seconds per slot, measured from the arrival of the first shred of each slot.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 5,
+    "x": 10,
+    "y": 0
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "1 / clamp_min(sum(rate(sniper_slots_total{job=\"$job\"}[$__rate_interval])), 0.001)",
+     "legendFormat": "block time"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "decimals": 2,
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "#EAB839",
+        "value": 1
+       },
+       {
+        "color": "red",
+        "value": 2
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "graphMode": "area",
+    "colorMode": "value",
+    "textMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
+   "id": 4,
+   "type": "stat",
+   "title": "Current slot",
+   "description": "Highest slot seen on the wire.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 3,
+    "x": 15,
+    "y": 0
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(sniper_slot_current{job=\"$job\"})",
+     "legendFormat": "slot"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "decimals": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "text"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "text",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "graphMode": "none",
+    "colorMode": "value",
+    "textMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
+   "id": 5,
+   "type": "stat",
+   "title": "Turbine peers",
+   "description": "Peers seen in gossip that can relay to us, and peers actually sending us shreds. Zero senders means we are not in the turbine tree.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 3,
+    "x": 18,
+    "y": 0
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(sniper_gossip_tvu_peers{job=\"$job\"})",
+     "legendFormat": "gossip"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(sniper_turbine_sources{job=\"$job\"})",
+     "legendFormat": "sending"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "decimals": 0,
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "red",
+        "value": null
+       },
+       {
+        "color": "green",
+        "value": 1
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "graphMode": "none",
+    "colorMode": "value",
+    "textMode": "value_and_name",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
+   "id": 6,
+   "type": "stat",
+   "title": "Shred loss",
+   "description": "Share of data shreds never received before their slot aged out, out of every shred the slot should have had. Erasure-recovered shreds count as received, so this is the loss that survived recovery: anything above zero means the TPS and transaction feed are undercounting. What turbine dropped before recovery is on 'Shred loss before and after recovery'.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 3,
+    "x": 21,
+    "y": 0
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "(sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0)) / clamp_min(sum(rate(sniper_shreds_received_total{job=\"$job\"}[$__rate_interval])) + (sum(rate(sniper_shreds_recovered_total{job=\"$job\"}[$__rate_interval])) or vector(0)) + (sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0)), 0.001)",
+     "legendFormat": "loss"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "decimals": 2,
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "#EAB839",
+        "value": 0.001
+       },
+       {
+        "color": "red",
+        "value": 0.01
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "graphMode": "area",
+    "colorMode": "value",
+    "textMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
+   "id": 10,
+   "type": "timeseries",
+   "title": "Transactions per second",
+   "description": "Throughput observed on the wire, split by kind. Non-vote is the number that matters for a sniper.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 5
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(sniper_transactions_total{job=\"$job\", kind=\"user\"}[$__rate_interval]))",
+     "legendFormat": "non-vote"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(sniper_transactions_total{job=\"$job\", kind=\"vote\"}[$__rate_interval]))",
+     "legendFormat": "vote"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(sniper_entries_total{job=\"$job\"}[$__rate_interval]))",
+     "legendFormat": "entries"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "suffix:/s",
+     "decimals": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true,
+      "axisSoftMin": 0
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 11,
+   "type": "timeseries",
+   "title": "Entry availability latency",
+   "description": "Time from a batch's first shred landing on our socket to its transactions being decoded. This is the head start over RPC.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 5
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_batch_latency_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p50"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(sniper_batch_latency_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p95"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.99, sum by (le) (rate(sniper_batch_latency_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p99"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 0,
+      "showPoints": "never",
+      "spanNulls": true,
+      "axisSoftMin": 0
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 12,
+   "type": "timeseries",
+   "title": "Turbine ingest",
+   "description": "Datagrams read from the TVU sockets, and how they split between usable data shreds and everything else (coding shreds, repair traffic, junk).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 13
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(sniper_packets_received_total{job=\"$job\"}[$__rate_interval]))",
+     "legendFormat": "packets"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(sniper_shreds_received_total{job=\"$job\"}[$__rate_interval]))",
+     "legendFormat": "data shreds"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(sniper_packets_rejected_total{job=\"$job\"}[$__rate_interval]))",
+     "legendFormat": "not data shreds"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "suffix:/s",
+     "decimals": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true,
+      "axisSoftMin": 0
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 13,
+   "type": "timeseries",
+   "title": "Shred loss and duplicates",
+   "description": "Shreds that never arrived before their slot aged out, and shreds delivered more than once by the turbine tree.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 13
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
+     "legendFormat": "missing"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(sniper_shreds_duplicate_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
+     "legendFormat": "duplicate"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "suffix:/s",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true,
+      "axisSoftMin": 0
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "missing"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 14,
+   "type": "timeseries",
+   "title": "Slot duration",
+   "description": "Distribution of wall time between consecutive slots, as seen from the shreds.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 8,
+    "x": 0,
+    "y": 21
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_duration_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p50"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(sniper_slot_duration_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p95"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 0,
+      "showPoints": "never",
+      "spanNulls": true,
+      "axisSoftMin": 0
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 15,
+   "type": "timeseries",
+   "title": "Pipeline backlog",
+   "description": "Packets waiting to be parsed, slots held in the assembler, and per-packet parse time. A growing queue means the parser is falling behind the sockets.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 8,
+    "x": 8,
+    "y": 21
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(sniper_queue_depth{job=\"$job\"})",
+     "legendFormat": "queued packets"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(sniper_slots_buffered{job=\"$job\"})",
+     "legendFormat": "buffered slots"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.99, sum by (le) (rate(sniper_packet_latency_seconds_bucket{job=\"$job\"}[$__rate_interval]))) * 1000",
+     "legendFormat": "parse p99 (ms)"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "decimals": 1,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 0,
+      "showPoints": "never",
+      "spanNulls": true,
+      "axisSoftMin": 0
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 16,
+   "type": "timeseries",
+   "title": "Batches and snipe hits",
+   "description": "Entry batches reassembled per second by outcome, plus transactions matching SNIPE_PROGRAM. Sustained 'failed' means the shred layout drifted.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 8,
+    "x": 16,
+    "y": 21
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum by (outcome) (rate(sniper_batches_total{job=\"$job\"}[$__rate_interval]))",
+     "legendFormat": "{{outcome}}"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(sniper_snipe_hits_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
+     "legendFormat": "snipe hits"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "suffix:/s",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true,
+      "axisSoftMin": 0
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "failed"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "snipe hits"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "purple"
+        }
+       },
+       {
+        "id": "custom.lineWidth",
+        "value": 3
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 36,
+   "type": "stat",
+   "title": "Current leader",
+   "description": "Validator producing the slot currently on the wire, per the RPC leader schedule.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 5,
+    "x": 0,
+    "y": 28
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (leader) (sniper_slot_leader{job=\"$job\"} == 1)",
+     "legendFormat": "{{leader}}",
+     "instant": true
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "graphMode": "none",
+    "colorMode": "value",
+    "textMode": "name",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
+   "id": 37,
+   "type": "state-timeline",
+   "title": "Leader schedule",
+   "description": "Which validator led the slots rolling past, from the RPC leader schedule. One row per validator; a filled segment is their rotation.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 19,
+    "x": 5,
+    "y": 28
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (leader) (sniper_slot_leader{job=\"$job\"})",
+     "legendFormat": "{{leader}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "min": 0,
+     "max": 1,
+     "custom": {
+      "fillOpacity": 70,
+      "lineWidth": 0,
+      "spanNulls": false
+     },
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "",
+         "color": "transparent",
+         "index": 1
+        },
+        "1": {
+         "text": "leading",
+         "color": "green",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "mergeValues": true,
+    "showValue": "never",
+    "rowHeight": 0.8,
+    "alignValue": "left",
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": false
+    },
+    "tooltip": {
+     "mode": "single"
+    }
+   }
+  },
+  {
+   "id": 20,
+   "type": "stat",
+   "title": "Slot coverage",
+   "description": "Median share of a slot's data shreds we actually saw, measured against the count the slot's closing shred declares. This is the product: everything downstream can only be as complete as this.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 5,
+    "x": 0,
+    "y": 34
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_completeness_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p50"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "decimals": 2,
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "red",
+        "value": null
+       },
+       {
+        "color": "#EAB839",
+        "value": 0.95
+       },
+       {
+        "color": "green",
+        "value": 0.99
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "graphMode": "area",
+    "colorMode": "value",
+    "textMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
+   "id": 21,
+   "type": "stat",
+   "title": "Kernel drops",
+   "description": "Datagrams the kernel discarded before we could read them. Nothing else on this dashboard moves when this does: an overflowing receive buffer looks exactly like a quiet network.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 5,
+    "x": 5,
+    "y": 34
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(sniper_udp_drops_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
+     "legendFormat": "drops"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "pps",
+     "decimals": 2,
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "#EAB839",
+        "value": 0.001
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "graphMode": "area",
+    "colorMode": "value",
+    "textMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
+   "id": 22,
+   "type": "stat",
+   "title": "Opaque transactions",
+   "description": "Share of transactions reaching programs through an address lookup table. We cannot resolve those, so a snipe target behind one is missed rather than misreported: this is the size of that blind spot.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 10,
+    "y": 34
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "(sum(rate(sniper_transactions_opaque_total{job=\"$job\"}[$__rate_interval])) or vector(0)) / clamp_min(sum(rate(sniper_transactions_total{job=\"$job\"}[$__rate_interval])), 0.001)",
+     "legendFormat": "opaque"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "decimals": 2,
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "#EAB839",
+        "value": 0.2
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "graphMode": "area",
+    "colorMode": "value",
+    "textMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
+   "id": 23,
+   "type": "timeseries",
+   "title": "Snipe latency within slot",
+   "description": "How far into the slot we were when a snipe hit surfaced, measured from the slot's first shred. A hit at 350 ms of a 400 ms slot is worthless; the count of hits alone never says which kind we got.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 10,
+    "x": 14,
+    "y": 34
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_snipe_latency_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p50"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(sniper_snipe_latency_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p95"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 0,
+      "showPoints": "never",
+      "spanNulls": true,
+      "axisSoftMin": 0
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 24,
+   "type": "timeseries",
+   "title": "Slot coverage distribution",
+   "description": "Coverage across slots. The low quantiles are the interesting ones: a p50 of 100% with a p01 of 80% means a fifth of some slots is routinely invisible to us.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 8,
+    "x": 0,
+    "y": 39
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_completeness_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p50"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.1, sum by (le) (rate(sniper_slot_completeness_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p10"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.01, sum by (le) (rate(sniper_slot_completeness_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p01"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 0,
+      "showPoints": "never",
+      "spanNulls": true,
+      "axisSoftMax": 1
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 25,
+   "type": "timeseries",
+   "title": "Delivery skew vs leader clock",
+   "description": "Arrival offset within the slot minus the offset the leader stamped into the shred's reference tick. The two clocks share no origin, so the absolute value means nothing \u2014 the spread is turbine delivery jitter, and widening is what to watch.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 8,
+    "x": 8,
+    "y": 39
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_delivery_skew_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p50"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(sniper_delivery_skew_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p95"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 0,
+      "showPoints": "never",
+      "spanNulls": true
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 26,
+   "type": "timeseries",
+   "title": "Ingest pressure",
+   "description": "Early warning, in the order it fires: the queue peak rises first, then receivers start allocating because the parser has not returned a batch, and only then does the kernel begin dropping. Slots without a closing shred ride along as a coverage caveat.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 8,
+    "x": 16,
+    "y": 39
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(sniper_queue_depth_peak{job=\"$job\"})",
+     "legendFormat": "queue peak"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(sniper_pool_exhausted_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
+     "legendFormat": "pool exhausted/s"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(sniper_udp_drops_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
+     "legendFormat": "kernel drops/s"
+    },
+    {
+     "refId": "D",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(sniper_slots_unterminated_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
+     "legendFormat": "unterminated slots/s"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 0,
+      "showPoints": "never",
+      "spanNulls": true,
+      "axisSoftMin": 0
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 27,
+   "type": "timeseries",
+   "title": "Batch latency by path",
+   "description": "Entry batch latency split by whether the batch had to wait on erasure recovery. The gap between the two lines is what recovery costs us in time, as opposed to what it saves us in shreds.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 12,
+    "x": 0,
+    "y": 46
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le, recovered) (rate(sniper_batch_latency_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p95 recovered={{recovered}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 0,
+      "showPoints": "never",
+      "spanNulls": true,
+      "axisSoftMin": 0
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 28,
+   "type": "timeseries",
+   "title": "Read batching",
+   "description": "Datagrams returned per recvmmsg call. Piled up at one means the syscall amortizes nothing and the socket is idle between packets; mass at 64 means we are reading at line rate.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 12,
+    "x": 12,
+    "y": 46
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_recv_batch_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p50"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(sniper_recv_batch_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p95"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 0,
+      "showPoints": "never",
+      "spanNulls": true,
+      "axisSoftMin": 0
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 29,
+   "type": "timeseries",
+   "title": "Erasure recovery",
+   "description": "Data shreds rebuilt from their erasure batch, against the ones that stayed lost and the batches that could not be repaired at all. Recovery is the only thing standing between turbine dropping a shred and us never seeing its transactions: without it, 'recovered' would be added to 'still missing'.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 12,
+    "x": 0,
+    "y": 53
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(sniper_shreds_recovered_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
+     "legendFormat": "recovered"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
+     "legendFormat": "still missing"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(sniper_fec_sets_incomplete_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
+     "legendFormat": "unrecoverable batches"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "suffix:/s",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true,
+      "axisSoftMin": 0
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "recovered"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "green"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "still missing"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "unrecoverable batches"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "orange"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 30,
+   "type": "timeseries",
+   "title": "Shred loss before and after recovery",
+   "description": "What turbine failed to deliver, and what was still missing once Reed-Solomon had done its work. Both are measured against every data shred the slot should have had, so the gap between the lines is exactly what recovery bought us. Note this differs from the 'Shred loss' stat above, which leaves recovered shreds out of its denominator.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 12,
+    "x": 12,
+    "y": 53
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "((sum(rate(sniper_shreds_recovered_total{job=\"$job\"}[$__rate_interval])) or vector(0)) + (sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0))) / clamp_min(sum(rate(sniper_shreds_received_total{job=\"$job\"}[$__rate_interval])) + (sum(rate(sniper_shreds_recovered_total{job=\"$job\"}[$__rate_interval])) or vector(0)) + (sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0)), 0.001)",
+     "legendFormat": "turbine loss"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "(sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0)) / clamp_min(sum(rate(sniper_shreds_received_total{job=\"$job\"}[$__rate_interval])) + (sum(rate(sniper_shreds_recovered_total{job=\"$job\"}[$__rate_interval])) or vector(0)) + (sum(rate(sniper_shreds_missing_total{job=\"$job\"}[$__rate_interval])) or vector(0)), 0.001)",
+     "legendFormat": "after recovery"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "decimals": 2,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 0,
+      "showPoints": "never",
+      "spanNulls": true,
+      "axisSoftMin": 0
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "turbine loss"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "orange"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "after recovery"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 31,
+   "type": "table",
+   "title": "Bot vs wallet, by slot",
+   "description": "One row per slot where either side traded. tx_gap is how many transactions separate the bot from the wallet inside the block. Reacting to a transaction can only land behind it, so a bot that snipes this wallet has a positive gap and small is good; a negative one means the bot fired on its own rather than in response. same_entry means the two share an entry, and transactions of one entry execute in parallel \u2014 the gap is still real but it does not order them. exact is false when a batch we never decoded sits between the two, which makes the count short by whatever it held. Until the bot exists, every row carries the wallet's signature alone, which is the baseline it will be judged against.",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "gridPos": {
+    "h": 10,
+    "w": 24,
+    "x": 0,
+    "y": 60
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     },
+     "expr": "{service_name=\"shred-sniper\"} |= `race`",
+     "queryType": "range",
+     "maxLines": 500
+    }
+   ],
+   "transformations": [
+    {
+     "id": "extractFields",
+     "options": {
+      "source": "labels",
+      "format": "json",
+      "replace": false,
+      "keepTime": true
+     }
+    },
+    {
+     "id": "convertFieldType",
+     "options": {
+      "conversions": [
+       {
+        "targetField": "tx_gap",
+        "destinationType": "number"
+       },
+       {
+        "targetField": "entry_gap",
+        "destinationType": "number"
+       },
+       {
+        "targetField": "slot",
+        "destinationType": "number"
+       }
+      ]
+     }
+    },
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Line": true,
+       "labels": true,
+       "labelTypes": true,
+       "tsNs": true,
+       "id": true,
+       "detected_level": true,
+       "scope_name": true,
+       "service_name": true,
+       "service_version": true,
+       "severity_number": true,
+       "severity_text": true,
+       "telemetry_sdk_language": true,
+       "telemetry_sdk_name": true,
+       "telemetry_sdk_version": true
+      },
+      "indexByName": {
+       "Time": 0,
+       "slot": 1,
+       "tx_gap": 2,
+       "entry_gap": 3,
+       "same_entry": 4,
+       "exact": 5,
+       "searcher": 6,
+       "target": 7
+      },
+      "renameByName": {
+       "searcher": "bot signature",
+       "target": "wallet signature"
+      }
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "left",
+      "cellOptions": {
+       "type": "auto"
+      },
+      "filterable": true
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "tx_gap"
+      },
+      "properties": [
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "color-text"
+        }
+       },
+       {
+        "id": "custom.align",
+        "value": "right"
+       },
+       {
+        "id": "thresholds",
+        "value": {
+         "mode": "absolute",
+         "steps": [
+          {
+           "color": "text",
+           "value": null
+          },
+          {
+           "color": "green",
+           "value": 0
+          },
+          {
+           "color": "#EAB839",
+           "value": 25
+          },
+          {
+           "color": "red",
+           "value": 100
+          }
+         ]
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "entry_gap"
+      },
+      "properties": [
+       {
+        "id": "custom.align",
+        "value": "right"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "exact"
+      },
+      "properties": [
+       {
+        "id": "mappings",
+        "value": [
+         {
+          "type": "value",
+          "options": {
+           "false": {
+            "color": "orange",
+            "index": 0,
+            "text": "false"
+           }
+          }
+         }
+        ]
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "color-text"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false,
+     "reducer": [
+      "sum"
+     ],
+     "countRows": false,
+     "fields": ""
+    },
+    "sortBy": [
+     {
+      "displayName": "Time",
+      "desc": true
+     }
+    ]
+   }
+  },
+  {
+   "id": 32,
+   "type": "stat",
+   "title": "Watched wallet",
+   "description": "Transactions per second paid for by a wallet in TARGET_WALLETS. Zero means either the wallet is idle or the address is wrong \u2014 nothing else on this row can be read until this one moves.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 5,
+    "x": 0,
+    "y": 70
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(sniper_watched_transactions_total{job=\"$job\"}[$__rate_interval])) or vector(0)",
+     "legendFormat": "tx/s"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "suffix:tx/s",
+     "decimals": 2,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "text"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "text",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "graphMode": "area",
+    "colorMode": "value",
+    "textMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
+   "id": 33,
+   "type": "stat",
+   "title": "Slot left, typical",
+   "description": "What is left of the slot by the time the wallet's transaction is decoded here. This is the entire budget for reacting to it and landing in the same block: everything a sniper would have to do \u2014 decide, sign, send, and reach the leader \u2014 has to fit inside this number. The slot's length is the measured one rather than mainnet's 400 ms, so the reading stays honest on a cluster that runs slower.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 5,
+    "x": 5,
+    "y": 70
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_duration_seconds_bucket{job=\"$job\"}[$__rate_interval]))) - histogram_quantile(0.5, sum by (le) (rate(sniper_watched_offset_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p50"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "decimals": 3,
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "red",
+        "value": null
+       },
+       {
+        "color": "#EAB839",
+        "value": 0.05
+       },
+       {
+        "color": "green",
+        "value": 0.15
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "graphMode": "area",
+    "colorMode": "value",
+    "textMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
+   "id": 34,
+   "type": "stat",
+   "title": "Slot left, worst 5%",
+   "description": "The same budget in the slowest twentieth of cases. A sniper is judged on this rather than on the median: the trades worth taking are the ones nobody else got to, and those are exactly the ones that surfaced late.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 5,
+    "x": 10,
+    "y": 70
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_duration_seconds_bucket{job=\"$job\"}[$__rate_interval]))) - histogram_quantile(0.95, sum by (le) (rate(sniper_watched_offset_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p05"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "decimals": 3,
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "red",
+        "value": null
+       },
+       {
+        "color": "#EAB839",
+        "value": 0.05
+       },
+       {
+        "color": "green",
+        "value": 0.15
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "graphMode": "area",
+    "colorMode": "value",
+    "textMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
+   "id": 35,
+   "type": "timeseries",
+   "title": "Watched wallet within the slot",
+   "description": "Where in the slot the wallet's transactions surface, measured from our own first shred of that slot. The slot's own length is drawn alongside: a quantile touching that line is a transaction that left no room to answer it in the same block. The gap between p50 and p99 is what a reaction budget has to survive.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 9,
+    "x": 15,
+    "y": 70
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_watched_offset_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p50"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(sniper_watched_offset_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p95"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.99, sum by (le) (rate(sniper_watched_offset_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p99"
+    },
+    {
+     "refId": "D",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_duration_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "slot length"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 0,
+      "showPoints": "never",
+      "spanNulls": true,
+      "axisSoftMin": 0
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "slot length"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "text"
+        }
+       },
+       {
+        "id": "custom.lineStyle",
+        "value": {
+         "fill": "dash",
+         "dash": [
+          10,
+          10
+         ]
+        }
+       },
+       {
+        "id": "custom.lineWidth",
+        "value": 1
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 40,
+   "type": "stat",
+   "title": "Fires per minute",
+   "description": "Memo transactions the sniper sent in answer to the watched wallet. This is the throughput of the whole loop: nothing here moves unless the wallet traded, the shreds carrying it arrived, and the answer went out.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 0,
+    "y": 76
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(sniper_fire_sends_total{job=\"$job\",outcome=\"sent\"}[$__rate_interval])) * 60",
+     "legendFormat": ""
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 1,
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "red",
+        "value": null
+       },
+       {
+        "color": "green",
+        "value": 0.001
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "graphMode": "area",
+    "colorMode": "value",
+    "textMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
+   "id": 41,
+   "type": "stat",
+   "title": "Answers that landed",
+   "description": "Share of sent transactions the sniper later saw come back in a block. Nothing is asked of the RPC to work this out \u2014 our own transaction reaches us over turbine like everybody else's, so being included is something the sniper observes rather than something it is told.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 4,
+    "y": 76
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(sniper_fire_landed_total{job=\"$job\",outcome=\"landed\"}[5m])) / clamp_min(sum(rate(sniper_fire_landed_total{job=\"$job\"}[5m])), 1e-12)",
+     "legendFormat": ""
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "decimals": 1,
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "red",
+        "value": null
+       },
+       {
+        "color": "#EAB839",
+        "value": 0.8
+       },
+       {
+        "color": "green",
+        "value": 0.95
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "graphMode": "area",
+    "colorMode": "value",
+    "textMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
+   "id": 42,
+   "type": "stat",
+   "title": "Reaction, typical",
+   "description": "From the watched wallet's transaction surfacing out of the shred stream to our own being away. This is the entire span the sniper controls; everything before it belongs to turbine and everything after it to the leader.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 8,
+    "y": 76
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_fire_reaction_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": ""
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "decimals": 4,
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "#EAB839",
+        "value": 0.005
+       },
+       {
+        "color": "red",
+        "value": 0.02
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "graphMode": "area",
+    "colorMode": "value",
+    "textMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
+   "id": 43,
+   "type": "stat",
+   "title": "Reaction, worst 5%",
+   "description": "The tail of the same measurement. A sniper is judged on this rather than on its median: the slot it misses is the slow one.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 12,
+    "y": 76
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(sniper_fire_reaction_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": ""
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "decimals": 4,
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "#EAB839",
+        "value": 0.01
+       },
+       {
+        "color": "red",
+        "value": 0.05
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "graphMode": "area",
+    "colorMode": "value",
+    "textMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
+   "id": 44,
+   "type": "stat",
+   "title": "Answered in the same slot",
+   "description": "Share of answers included in the very slot the trigger was seen in \u2014 the sniper reacting inside the leader's own block rather than in the next one. Anything less than that is still a landed transaction, just not a contended one.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 16,
+    "y": 76
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(sniper_fire_slots_behind_bucket{job=\"$job\",le=\"0.0\"}[5m])) / clamp_min(sum(rate(sniper_fire_slots_behind_count{job=\"$job\"}[5m])), 1e-12)",
+     "legendFormat": ""
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "decimals": 1,
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "red",
+        "value": null
+       },
+       {
+        "color": "#EAB839",
+        "value": 0.5
+       },
+       {
+        "color": "green",
+        "value": 0.9
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "graphMode": "area",
+    "colorMode": "value",
+    "textMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
+   "id": 45,
+   "type": "stat",
+   "title": "Blockhash age",
+   "description": "How old the blockhash the next fire would be signed with is. Every millisecond here is time the transaction no longer has to be included in, and a refresher that has quietly stalled shows up in this number long before it shows up as answers that never land.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 20,
+    "y": 76
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(sniper_blockhash_age_milliseconds{job=\"$job\"})",
+     "legendFormat": ""
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "decimals": 0,
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "#EAB839",
+        "value": 1000
+       },
+       {
+        "color": "red",
+        "value": 3000
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "graphMode": "area",
+    "colorMode": "value",
+    "textMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   }
+  },
+  {
+   "id": 46,
+   "type": "timeseries",
+   "title": "Reaction time",
+   "description": "The reaction split into its two parts. The send is the RPC round trip, which belongs to the network; the distance between it and the total is everything the sniper does itself \u2014 build the memo, sign it, hand it over. When the two lines sit on top of one another there is nothing left to optimise on this side.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 8,
+    "x": 0,
+    "y": 81
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_fire_reaction_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "reaction p50"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(sniper_fire_reaction_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "reaction p95"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.99, sum by (le) (rate(sniper_fire_reaction_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "reaction p99"
+    },
+    {
+     "refId": "D",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_fire_send_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "send p50"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 0,
+      "showPoints": "never",
+      "spanNulls": true,
+      "axisSoftMin": 0
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "send p50"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "text"
+        }
+       },
+       {
+        "id": "custom.lineStyle",
+        "value": {
+         "fill": "dash",
+         "dash": [
+          10,
+          10
+         ]
+        }
+       },
+       {
+        "id": "custom.lineWidth",
+        "value": 1
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 47,
+   "type": "timeseries",
+   "title": "What became of each trigger",
+   "description": "Every watched transaction the pipeline surfaced, and what the sniper managed to do with it. Skipped is the cooldown holding a burst to one answer; dropped is the send queue full, which means the packet path let a trigger go rather than block on a socket and lose shreds.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 8,
+    "x": 8,
+    "y": 81
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(sniper_fire_triggers_total{job=\"$job\"}[$__rate_interval]))",
+     "legendFormat": "triggered"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum by (outcome) (rate(sniper_fire_sends_total{job=\"$job\"}[$__rate_interval]))",
+     "legendFormat": "{{outcome}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "reqps",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 0,
+      "showPoints": "never",
+      "spanNulls": true,
+      "axisSoftMin": 0
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 48,
+   "type": "timeseries",
+   "title": "Answer round trip",
+   "description": "From our transaction being sent to seeing it in a block, measured on the shreds coming back. This is the leader's side of the loop rather than ours, and it is what sets how long a sniper has to wait before it knows whether it won.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 8,
+    "x": 16,
+    "y": 81
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_fire_round_trip_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p50"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(sniper_fire_round_trip_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p95"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_duration_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "slot length"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 0,
+      "showPoints": "never",
+      "spanNulls": true,
+      "axisSoftMin": 0
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "slot length"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "text"
+        }
+       },
+       {
+        "id": "custom.lineStyle",
+        "value": {
+         "fill": "dash",
+         "dash": [
+          10,
+          10
+         ]
+        }
+       },
+       {
+        "id": "custom.lineWidth",
+        "value": 1
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 49,
+   "type": "timeseries",
+   "title": "Where the answer landed",
+   "description": "Slots between the one the trigger was seen in and the one the answer was included in. Zero is the sniper landing in the leader's own block \u2014 the only outcome that would have contended with the wallet it was racing.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 12,
+    "x": 0,
+    "y": 88
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_fire_slots_behind_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p50"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(sniper_fire_slots_behind_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "p95"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 0,
+      "showPoints": "never",
+      "spanNulls": true,
+      "axisSoftMin": 0
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 50,
+   "type": "timeseries",
+   "title": "Reaction against the slot budget",
+   "description": "The reaction laid over the time there was to spend. The budget is what remains of the slot once the wallet's transaction has been decoded here; the reaction is what the sniper spends out of it. The distance between the two lines is the margin, and a budget that dips toward the reaction is a slot arriving too late to answer at all.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 12,
+    "x": 12,
+    "y": 88
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_duration_seconds_bucket{job=\"$job\"}[$__rate_interval]))) - histogram_quantile(0.95, sum by (le) (rate(sniper_watched_offset_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "budget left in slot"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(sniper_fire_reaction_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+     "legendFormat": "reaction p95"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 0,
+      "showPoints": "never",
+      "spanNulls": true,
+      "axisSoftMin": 0
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "budget left in slot"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "text"
+        }
+       },
+       {
+        "id": "custom.lineStyle",
+        "value": {
+         "fill": "dash",
+         "dash": [
+          10,
+          10
+         ]
+        }
+       },
+       {
+        "id": "custom.lineWidth",
+        "value": 1
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": [
+      "lastNotNull",
+      "max"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  }
+ ]
 }
