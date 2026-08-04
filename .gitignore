@@ -1,9 +1,2 @@
 .claude/
 /target
-
-# Keypairs. `solana-keygen` writes a bare JSON array of the secret bytes, which
-# looks like any other config file and is trivially committed by accident — as
-# wallet-a.json and wallet-b.json in this repository's history were.
-*keypair*.json
-wallet-*.json
-identity.json

@@ -1,17 +1,13 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
 KEYS=/keys
 LEDGER=/genesis
 PROGRAMS=/programs
 
-# SPL Memo. Baked into genesis rather than deployed afterwards so that it is
-# there from slot 0 and no test has to wait for, or depend on, a deploy.
 MEMO_PROGRAM_ID=MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr
 MEMO_SO="$PROGRAMS/spl_memo.so"
-# The loader the program was built for. Not upgradeable: nothing here ever
-# needs to replace it, and an upgrade authority would only be one more account
-# to explain.
+# Pinned to a specific SPL Memo release; the sha256 is what makes "pinned"
+# mean something rather than trusting whatever this URL happens to serve.
+MEMO_SO_URL="https://github.com/solana-program/memo/releases/download/memo-v3.0.0/spl_memo.so"
+MEMO_SO_SHA256="<сюда_реальный_хеш>"
 BPF_LOADER=BPFLoader2111111111111111111111111111111111
 
 if [ -f "$LEDGER/genesis.bin" ]; then
@@ -19,11 +15,12 @@ if [ -f "$LEDGER/genesis.bin" ]; then
   exit 0
 fi
 
-mkdir -p "$KEYS" "$LEDGER"
+mkdir -p "$KEYS" "$LEDGER" "$PROGRAMS"
 
 if [ ! -f "$MEMO_SO" ]; then
-  echo "[genesis] $MEMO_SO is missing; mount it from the repository root" >&2
-  exit 1
+  echo "[genesis] fetching spl_memo.so"
+  curl -fsSL -o "$MEMO_SO" "$MEMO_SO_URL"
+  echo "$MEMO_SO_SHA256  $MEMO_SO" | sha256sum -c -
 fi
 
 gen() {
