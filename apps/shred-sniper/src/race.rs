@@ -109,7 +109,7 @@ impl Slot {
     /// transactions, and every transaction it carried is one the gap is short
     /// by — so the number is reported either way, but never as exact.
     fn tiled(&self, from: u32, to: u32) -> bool {
-        let (low, high) = if from <= to { (from, to) } else { (to, from) };
+        let (low, high) = ordered(from, to);
         let mut expected = low;
         for (first_shred, span) in self.batches.range(low..=high) {
             if *first_shred != expected {
@@ -118,6 +118,15 @@ impl Slot {
             expected = span.last_shred + 1;
         }
         self.batches.contains_key(&high)
+    }
+
+    /// How many batches the range between two shreds is made of, which is what
+    /// says whether [`Self::tiled`] had anything to check. One batch means both
+    /// transactions sit in it and the range is tiled by construction; the answer
+    /// is only evidence of a whole range once there are several.
+    fn spans(&self, from: u32, to: u32) -> usize {
+        let (low, high) = ordered(from, to);
+        self.batches.range(low..=high).count()
     }
 
     /// Emits a line per pair. A side that never showed up is still reported —
@@ -174,6 +183,7 @@ impl Slot {
                     same_entry = searcher.first_shred == target.first_shred
                         && searcher.entry == target.entry,
                     exact = self.tiled(searcher.first_shred, target.first_shred),
+                    spans = self.spans(searcher.first_shred, target.first_shred),
                     "race"
                 );
             }
@@ -270,6 +280,12 @@ impl Tracker {
     }
 }
 
+/// Neither side of a race is known to be the earlier one — the bot may have
+/// landed in front of the wallet — so a range between them is read low to high.
+fn ordered(from: u32, to: u32) -> (u32, u32) {
+    if from <= to { (from, to) } else { (to, from) }
+}
+
 pub(crate) fn signature(transaction: &VersionedTransaction) -> String {
     transaction
         .signatures
@@ -351,6 +367,23 @@ mod tests {
             !holed.tiled(0, 6),
             "the batch covering shreds 3..=5 is missing"
         );
+    }
+
+    /// `tiled` is answered by construction when both transactions are in one
+    /// batch, so a row has to carry what the answer was worth. Only a range of
+    /// several batches is evidence that nothing went missing between them.
+    #[test]
+    fn one_batch_tiles_itself_and_says_nothing() {
+        let slot = slot_with(&[(0, 2, &[1]), (3, 5, &[1]), (6, 8, &[1])]);
+
+        assert!(slot.tiled(3, 3));
+        assert_eq!(slot.spans(3, 3), 1, "there was no range to check");
+
+        assert!(slot.tiled(0, 6));
+        assert_eq!(slot.spans(0, 6), 3, "two batches had to hold the range open");
+
+        // Read low to high whichever side of the wallet the bot landed on.
+        assert_eq!(slot.spans(6, 0), slot.spans(0, 6));
     }
 
     /// Order within an entry is not order of execution, so the two have to be
