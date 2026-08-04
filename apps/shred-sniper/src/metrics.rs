@@ -129,6 +129,10 @@ enum FireOutcome {
     Skipped,
     /// The send queue was full, so the packet path let it go rather than wait.
     Dropped,
+    /// Overtaken by a fresher trigger, or already older than the slot it was
+    /// meant to answer. Counted apart from `Skipped` because a cooldown is a
+    /// choice not to fire and this is a fire that would have missed.
+    Stale,
 }
 
 impl FireOutcome {
@@ -138,6 +142,7 @@ impl FireOutcome {
             Self::Failed => "failed",
             Self::Skipped => "skipped",
             Self::Dropped => "dropped",
+            Self::Stale => "stale",
         }
     }
 }
@@ -153,6 +158,11 @@ struct Gauges {
     /// which is exactly the kind that costs us shreds.
     queue_depth_peak: AtomicU64,
     buffered_slots: AtomicU64,
+    /// Entry bytes the assembler is holding. The budget that bounds it refuses
+    /// shreds once it is reached, so how close this sits to it is the
+    /// difference between a cap that is protecting the process and one that is
+    /// quietly costing it the shreds it exists to read.
+    buffered_bytes: AtomicU64,
     /// Datagrams the kernel dropped on our sockets, cumulative since boot of
     /// the socket. Nothing else we measure moves when this does: an overflowing
     /// receive buffer looks precisely like a quiet network.
@@ -161,6 +171,12 @@ struct Gauges {
     /// fetched. Every one of them is a slot the transaction no longer has to
     /// land in, so a refresher that has quietly stalled shows up here before it
     /// shows up as fires that never land.
+    ///
+    /// This is the age of our copy, not of the hash: whatever the RPC's
+    /// commitment already put between the hash and the tip is not in here. That
+    /// is why the client asks for `confirmed` — under the default, `finalized`,
+    /// this gauge would read near zero while the hash it describes was some
+    /// thirty slots old.
     blockhash_age_ms: AtomicU64,
 }
 
@@ -242,6 +258,14 @@ impl Metrics {
             ),
             observable(
                 meter,
+                "sniper.bytes.buffered",
+                "By",
+                "Entry bytes held in the assembler",
+                gauges.clone(),
+                |gauges| gauges.buffered_bytes.load(Ordering::Relaxed),
+            ),
+            observable(
+                meter,
                 "sniper.blockhash.age",
                 "ms",
                 "Age of the blockhash the next fire would be signed with",
@@ -293,6 +317,8 @@ pub struct PacketMetrics {
     packets_rejected: Counter<u64>,
     shreds_received: Counter<u64>,
     coding_shreds_received: Counter<u64>,
+    shreds_forged: Counter<u64>,
+    shreds_unverified: Counter<u64>,
     packet_latency: Histogram<f64>,
 }
 
@@ -319,6 +345,22 @@ impl PacketMetrics {
                 .with_unit("{shred}")
                 .with_description("Coding shreds parsed from turbine")
                 .build(),
+            shreds_forged: meter
+                .u64_counter("sniper.shreds.forged")
+                .with_unit("{shred}")
+                .with_description(
+                    "Shreds whose signature did not match the leader the slot was scheduled to",
+                )
+                .build(),
+            shreds_unverified: meter
+                .u64_counter("sniper.shreds.unverified")
+                .with_unit("{shred}")
+                // Taken on trust rather than refused: blinding the sniper
+                // because a schedule is a second late costs more than the
+                // forgery it would prevent. How often this moves is what says
+                // whether the check is really covering the wire.
+                .with_description("Shreds accepted without a leader to check them against")
+                .build(),
             packet_latency: meter
                 .f64_histogram("sniper.packet.latency")
                 .with_unit("s")
@@ -335,6 +377,14 @@ impl PacketMetrics {
             PacketKind::Coding => self.coding_shreds_received.add(1, &[]),
             PacketKind::Other => self.packets_rejected.add(1, &[]),
         }
+    }
+
+    pub fn forged(&self) {
+        self.shreds_forged.add(1, &[]);
+    }
+
+    pub fn unverified(&self) {
+        self.shreds_unverified.add(1, &[]);
     }
 
     pub fn processed(&self, elapsed: Duration) {
@@ -401,6 +451,7 @@ impl QueueMetrics {
 pub struct AssemblerMetrics {
     shreds_duplicate: Counter<u64>,
     shreds_missing: Counter<u64>,
+    shreds_over_budget: Counter<u64>,
     batches: Counter<u64>,
     batch_latency: Histogram<f64>,
     batch_first_entry: Histogram<f64>,
@@ -424,6 +475,13 @@ impl AssemblerMetrics {
                 .u64_counter("sniper.shreds.missing")
                 .with_unit("{shred}")
                 .with_description("Data shreds never received before the slot was evicted")
+                .build(),
+            shreds_over_budget: meter
+                .u64_counter("sniper.shreds.over_budget")
+                .with_unit("{shred}")
+                .with_description(
+                    "Data shreds refused because the assembler's byte budget was full",
+                )
                 .build(),
             batches: meter
                 .u64_counter("sniper.batches")
@@ -532,8 +590,19 @@ impl AssemblerMetrics {
         self.slots_unterminated.add(1, &[]);
     }
 
+    /// A shred turned away for want of memory rather than dropped for want of a
+    /// network. It is counted apart from the missing ones it will later look
+    /// like, because the two have nothing in common but the hole they leave.
+    pub fn over_budget(&self) {
+        self.shreds_over_budget.add(1, &[]);
+    }
+
     pub fn set_buffered_slots(&self, slots: u64) {
         self.gauges.buffered_slots.store(slots, Ordering::Relaxed);
+    }
+
+    pub fn set_buffered_bytes(&self, bytes: u64) {
+        self.gauges.buffered_bytes.store(bytes, Ordering::Relaxed);
     }
 }
 
@@ -764,7 +833,7 @@ pub struct FireMetrics {
     fire_landed: Counter<u64>,
     fire_round_trip: Histogram<f64>,
     fire_slots_behind: Histogram<u64>,
-    fire_attrs: [Vec<KeyValue>; 4],
+    fire_attrs: [Vec<KeyValue>; 5],
     landed_attrs: [Vec<KeyValue>; 2],
     /// The path fires leave by, carried on every measurement of the loop. The
     /// two paths are one hop apart and otherwise identical, so without this the
@@ -849,6 +918,10 @@ impl FireMetrics {
                     KeyValue::new("outcome", FireOutcome::Dropped.as_str()),
                     via.clone(),
                 ],
+                vec![
+                    KeyValue::new("outcome", FireOutcome::Stale.as_str()),
+                    via.clone(),
+                ],
             ],
             landed_attrs: [
                 vec![KeyValue::new("outcome", "landed"), via.clone()],
@@ -872,6 +945,7 @@ impl FireMetrics {
             FireOutcome::Failed => &self.fire_attrs[1],
             FireOutcome::Skipped => &self.fire_attrs[2],
             FireOutcome::Dropped => &self.fire_attrs[3],
+            FireOutcome::Stale => &self.fire_attrs[4],
         };
         self.fire_sends.add(1, attrs);
     }
@@ -896,6 +970,14 @@ impl FireMetrics {
 
     pub fn dropped(&self) {
         self.outcome(FireOutcome::Dropped);
+    }
+
+    /// A trigger that was never worth sending by the time the sender reached
+    /// it. How much of this there is says whether the sender is keeping up;
+    /// nothing else in the loop can, because a reaction time is only recorded
+    /// for the fires that actually happened.
+    pub fn stale(&self) {
+        self.outcome(FireOutcome::Stale);
     }
 
     pub fn landed(&self, round_trip: Duration, slots_behind: u64) {

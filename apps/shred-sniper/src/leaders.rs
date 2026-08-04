@@ -3,17 +3,24 @@
 //! A shred names its slot but never its author, and the signature it carries
 //! cannot be resolved back to a pubkey without already knowing the candidate.
 //! So the schedule comes from a validator's RPC, fetched in windows large
-//! enough that one request covers minutes of slots, and is republished as a
-//! gauge keyed by the sniper's *own* notion of the current slot — the point is
-//! to lay delivery quality over who was producing what we were receiving.
+//! enough that one request covers minutes of slots.
+//!
+//! It is used for two things. It is republished as a gauge keyed by the
+//! sniper's *own* notion of the current slot, to lay delivery quality over who
+//! was producing what we were receiving. And it is the candidate the signature
+//! above needs: knowing who should have produced a slot is what turns the
+//! signature every shred carries from an unreadable 64 bytes into the only
+//! thing on the wire that distinguishes a leader from anyone who knows our
+//! address.
 
 use {
     crate::metrics::SlotMetrics,
     solana_rpc_client::rpc_client::RpcClient,
+    solana_transaction::Address,
     std::{
         error::Error,
         sync::{
-            Arc,
+            Arc, RwLock,
             atomic::{AtomicBool, Ordering},
         },
         thread,
@@ -32,9 +39,39 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const WINDOW_SLOTS: u64 = 512;
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The schedule as the packet path sees it: one lookup, no RPC, no blocking on
+/// anything but the lock the refresher holds for the moment it swaps a window
+/// in. `None` from [`Self::leader`] means the schedule cannot answer for that
+/// slot — the window has not arrived, or has moved past it — which is a
+/// different thing from the slot having no leader, and the caller has to treat
+/// it as such.
+#[derive(Default)]
+pub struct Schedule {
+    window: RwLock<Option<Window>>,
+}
+
+impl Schedule {
+    pub fn leader(&self, slot: u64) -> Option<Address> {
+        self.window.read().ok()?.as_ref()?.leader(slot).copied()
+    }
+
+    /// A schedule that answers for one stretch of slots, so that what depends
+    /// on it can be tested without an RPC to fetch it from.
+    #[cfg(test)]
+    pub fn fixed(start: u64, leaders: Vec<Address>) -> Self {
+        Self {
+            window: RwLock::new(Some(Window {
+                start,
+                leaders,
+                roster: Vec::new(),
+            })),
+        }
+    }
+}
+
 struct Window {
     start: u64,
-    leaders: Vec<String>,
+    leaders: Vec<Address>,
     /// The distinct leaders of the window, kept so every tick can push an
     /// explicit zero to whoever is not leading — see [`SlotMetrics::leader`]
     /// for why silence is not enough.
@@ -42,9 +79,9 @@ struct Window {
 }
 
 impl Window {
-    fn leader(&self, slot: u64) -> Option<&str> {
+    fn leader(&self, slot: u64) -> Option<&Address> {
         let index = usize::try_from(slot.checked_sub(self.start)?).ok()?;
-        self.leaders.get(index).map(String::as_str)
+        self.leaders.get(index)
     }
 
     /// A refresh is due before the window actually runs out, so one failed
@@ -59,7 +96,9 @@ pub fn spawn(
     rpc_url: String,
     metrics: Arc<SlotMetrics>,
     exit: Arc<AtomicBool>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<Arc<Schedule>, Box<dyn Error>> {
+    let schedule = Arc::new(Schedule::default());
+    let held = schedule.clone();
     thread::Builder::new()
         .name("leader-schedule".to_string())
         .spawn(move || {
@@ -88,6 +127,16 @@ pub fn spawn(
                                 leaders = fresh.roster.len(),
                                 "leader schedule window refreshed"
                             );
+                            // Published before the local copy is kept, so the
+                            // packet path never waits a whole tick behind the
+                            // thread that fetched it.
+                            if let Ok(mut published) = held.window.write() {
+                                *published = Some(Window {
+                                    start: fresh.start,
+                                    leaders: fresh.leaders.clone(),
+                                    roster: fresh.roster.clone(),
+                                });
+                            }
                             window = Some(fresh);
                             errored = false;
                         }
@@ -101,16 +150,16 @@ pub fn spawn(
                     }
                 }
                 if let Some(window) = &window
-                    && let Some(current) = window.leader(slot)
+                    && let Some(current) = window.leader(slot).map(Address::to_string)
                 {
                     for leader in &window.roster {
-                        metrics.leader(leader, leader == current);
+                        metrics.leader(leader, *leader == current);
                     }
                 }
             }
         })
         .map_err(|err| format!("failed to spawn leader schedule thread: {err}"))?;
-    Ok(())
+    Ok(schedule)
 }
 
 fn fetch(rpc: &RpcClient, slot: u64) -> Result<Window, Box<dyn Error>> {
@@ -118,12 +167,8 @@ fn fetch(rpc: &RpcClient, slot: u64) -> Result<Window, Box<dyn Error>> {
     // current epoch, it can never reach past the end of the next — the last
     // one the RPC has a schedule for.
     let slots_in_epoch = rpc.get_epoch_info()?.slots_in_epoch;
-    let leaders: Vec<String> = rpc
-        .get_slot_leaders(slot, WINDOW_SLOTS.min(slots_in_epoch))?
-        .iter()
-        .map(|leader| leader.to_string())
-        .collect();
-    let mut roster = leaders.clone();
+    let leaders = rpc.get_slot_leaders(slot, WINDOW_SLOTS.min(slots_in_epoch))?;
+    let mut roster: Vec<String> = leaders.iter().map(ToString::to_string).collect();
     roster.sort_unstable();
     roster.dedup();
     Ok(Window {

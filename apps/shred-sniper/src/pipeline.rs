@@ -4,9 +4,11 @@ use {
         entries::Assembler,
         erasure::Recovery,
         fire::{Fire, Firing},
+        leaders::Schedule,
         metrics::{Metrics, PacketKind},
         race,
         shred::{self, DataShred},
+        verify::{Verdict, Verifier},
     },
     rustc_hash::FxHashSet,
     solana_streamer::packet::Packet,
@@ -79,6 +81,9 @@ pub struct Pipeline {
     race: Option<race::Tracker>,
     /// Present only when there is a key to sign with.
     fire: Option<Arc<Fire>>,
+    /// Present only when the leader schedule is being fetched. Without it a
+    /// shred cannot be told from a forgery, and the sniper runs on trust.
+    verifier: Option<Verifier>,
     shreds_seen: u64,
     slot: SlotState,
     started: Instant,
@@ -90,6 +95,7 @@ impl Pipeline {
         shred_version: u16,
         metrics: Arc<Metrics>,
         firing: Option<Firing>,
+        schedule: Option<Arc<Schedule>>,
     ) -> Self {
         // The address we sign with counts as one of ours whether or not it was
         // also listed by hand, so arming the sniper is enough to have its own
@@ -101,6 +107,7 @@ impl Pipeline {
             searchers.push(firing.searcher);
         }
 
+        let metrics_for_verify = metrics.clone();
         Self {
             assembler: Assembler::new(config.retention, metrics.assembler.clone()),
             recovery: Recovery::new(config.retention, metrics.recovery.clone()),
@@ -111,6 +118,8 @@ impl Pipeline {
             watched: config.target_wallets.iter().copied().collect(),
             race: race::Tracker::new(&searchers, &config.target_wallets),
             fire: firing.map(|firing| firing.fire),
+            verifier: schedule
+                .map(|schedule| Verifier::new(schedule, config.retention, metrics_for_verify)),
             searchers: searchers.into_iter().collect(),
             shreds_seen: 0,
             slot: SlotState::new(0),
@@ -132,6 +141,13 @@ impl Pipeline {
 
         let recovered;
         let received = match shred::parse(bytes, shred_version) {
+            // Both arms verify before the shred is believed, because everything
+            // downstream of here — the erasure batch it joins, the bytes it
+            // pins, the transaction it may carry — is work done on its word.
+            Some(shred) if self.forged(bytes, &shred) => {
+                self.metrics.packets.received(PacketKind::Other);
+                return;
+            }
             Some(shred::Shred::Data(data_shred)) => {
                 self.metrics.packets.received(PacketKind::Data);
                 if self.sources.insert(from) {
@@ -166,6 +182,29 @@ impl Pipeline {
         }
 
         self.metrics.packets.processed(processing_started.elapsed());
+    }
+
+    /// Whether this packet is provably not the leader's. Only a signature that
+    /// fails against a leader we actually know says so; everything else — no
+    /// schedule yet, a slot the window does not reach — is unproven rather than
+    /// false, and unproven is let through. Going deaf whenever an RPC is a
+    /// second late would cost more slots than a forger ever could.
+    fn forged(&mut self, bytes: &[u8], shred: &shred::Shred<'_>) -> bool {
+        let slot = match shred {
+            shred::Shred::Data(data) => data.slot,
+            shred::Shred::Coding(coding) => coding.slot,
+        };
+        let shred_version = self.shred_version;
+        let Some(verifier) = &mut self.verifier else {
+            return false;
+        };
+        match verifier.check(bytes, shred_version, slot) {
+            Verdict::Forged => {
+                debug!(slot, "shred did not match the slot's leader");
+                true
+            }
+            Verdict::Signed | Verdict::Unknown => false,
+        }
     }
 
     fn data_shred(&mut self, shred: &DataShred<'_>, from_recovery: bool) {

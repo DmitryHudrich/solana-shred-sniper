@@ -7,9 +7,15 @@
 //! Sending happens on a thread of its own, fed by a bounded queue. The packet
 //! path must never block on a socket — a send that stalls would stop the parser
 //! draining the receive queue, and the shreds lost while it did would cost more
-//! than any single fire is worth. When the queue is full the trigger is dropped
-//! and counted, because a fire that has been waiting behind others is answering
-//! a slot that has already gone.
+//! than any single fire is worth.
+//!
+//! What sits between the two is one trigger, not a queue of them. A fire that
+//! has been waiting behind others is answering a slot that has already gone, so
+//! there is nothing for an older trigger to be worth: a new one overwrites
+//! whatever the sender has not picked up yet. The sender then drops even that
+//! if it has aged past the slot it was meant for, which is the case a queue of
+//! depth one still cannot rule out — a send that outlasts the race leaves the
+//! freshest trigger there is already too old to answer.
 //!
 //! The loop closes through the same shred stream it opened on: our own
 //! transaction comes back to us as a shred like anyone else's, which is what
@@ -23,6 +29,7 @@ use {
         metrics::{FireMetrics, Metrics},
         tpu::LeaderTpus,
     },
+    solana_commitment_config::CommitmentConfig,
     solana_hash::Hash,
     solana_keypair::Keypair,
     solana_rpc_client::rpc_client::RpcClient,
@@ -33,9 +40,8 @@ use {
         collections::VecDeque,
         error::Error,
         sync::{
-            Arc, Mutex,
+            Arc, Condvar, Mutex,
             atomic::{AtomicBool, Ordering},
-            mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
         },
         thread,
         time::{Duration, Instant},
@@ -43,9 +49,16 @@ use {
     tracing::{debug, info, warn},
 };
 
-/// Deep enough to ride out one slow send, shallow enough that what comes out
-/// the far end is still about the slot it went in for.
-const QUEUE_DEPTH: usize = 16;
+/// How long the sender may sleep before it looks at the exit flag again. It is
+/// woken the moment a trigger arrives, so this only bounds how long a shutdown
+/// waits on an idle thread.
+const WAKE_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How old a trigger may be and still be worth answering. A slot is the whole
+/// of the window the sniper is racing inside: past it, the transaction that
+/// prompted this has been in a block for some time and the answer is addressed
+/// to a slot nobody is building any more.
+const MAX_TRIGGER_AGE: Duration = Duration::from_millis(400);
 
 /// Fires still waiting to be seen in a block. A transaction that has not landed
 /// within a couple of hundred slots never will — its blockhash is long expired
@@ -59,6 +72,16 @@ const PENDING_TTL: Duration = Duration::from_secs(120);
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The client's own default is `finalized`, which is a blockhash from a block
+/// some thirty slots behind the tip. Age costs a transaction nothing but the
+/// span it stays valid for, so this was never about landing sooner — it is
+/// about the blockhash age gauge describing the hash we hold rather than the
+/// moment we asked for it, and about leaving the validity window whole in case
+/// a send is ever retried. `processed` is the level not to take: a hash from a
+/// block that is rolled back makes the transaction invalid for good, while
+/// `confirmed` has a supermajority behind it.
+const COMMITMENT: CommitmentConfig = CommitmentConfig::confirmed();
+
 /// What the packet path hands over: the watched wallet's transaction, and when
 /// we had it. The clock starts here rather than at send time, because the
 /// question this whole crate exists to answer is how long the answer took from
@@ -67,6 +90,70 @@ struct Trigger {
     slot: u64,
     target: Signature,
     detected: Instant,
+}
+
+/// What became of a trigger on its way to the sender.
+enum Handover {
+    /// It is the one waiting to be answered.
+    Waiting,
+    /// It is waiting, and it took the place of one the sender never reached.
+    Displaced,
+    /// It never got there at all, which means the sender thread died holding
+    /// the lock. Nothing will fire again, and this is the only sign of it.
+    Lost,
+}
+
+/// The one trigger worth answering, and room for exactly that.
+///
+/// A queue would keep triggers in the order they arrived, which is the opposite
+/// of the order they are worth: each one is about the same race, and the newest
+/// knows the most about it. So this holds one, a new trigger replaces it, and
+/// what it replaced is counted as overtaken rather than waited on.
+///
+/// The lock is held only long enough to swap a value, never across a send — the
+/// packet path calls [`Self::put`] and must not be made to wait on a socket.
+struct Latest {
+    trigger: Mutex<Option<Trigger>>,
+    arrived: Condvar,
+}
+
+impl Latest {
+    fn new() -> Self {
+        Self {
+            trigger: Mutex::new(None),
+            arrived: Condvar::new(),
+        }
+    }
+
+    fn put(&self, trigger: Trigger) -> Handover {
+        let Ok(mut held) = self.trigger.lock() else {
+            return Handover::Lost;
+        };
+        let displaced = held.replace(trigger).is_some();
+        drop(held);
+        self.arrived.notify_one();
+        if displaced {
+            Handover::Displaced
+        } else {
+            Handover::Waiting
+        }
+    }
+
+    /// Blocks until there is a trigger to answer, or until the sniper is
+    /// stopping. Waking on an interval rather than on a signal of its own is
+    /// what lets the exit flag be the only shutdown path there is.
+    fn take(&self, exit: &AtomicBool) -> Option<Trigger> {
+        let mut held = self.trigger.lock().ok()?;
+        loop {
+            if let Some(trigger) = held.take() {
+                return Some(trigger);
+            }
+            if exit.load(Ordering::Relaxed) {
+                return None;
+            }
+            held = self.arrived.wait_timeout(held, WAKE_INTERVAL).ok()?.0;
+        }
+    }
 }
 
 /// A transaction we have sent and not yet seen come back.
@@ -81,26 +168,30 @@ struct Pending {
 /// The handle the packet path holds. Both methods are called from the parser
 /// thread and neither may block for long.
 pub struct Fire {
-    triggers: SyncSender<Trigger>,
+    latest: Arc<Latest>,
     pending: Mutex<VecDeque<Pending>>,
     metrics: Arc<FireMetrics>,
 }
 
 impl Fire {
-    /// A watched wallet's transaction has surfaced. Never blocks: a full queue
-    /// means the sender is still busy with an older trigger, and by the time it
-    /// got to this one the slot to react in would be gone.
+    /// A watched wallet's transaction has surfaced. Never blocks on anything
+    /// but a swap: the packet path stopping costs shreds, and shreds are worth
+    /// more than any one fire.
     pub fn trigger(&self, slot: u64, target: Signature, detected: Instant) {
         let trigger = Trigger {
             slot,
             target,
             detected,
         };
-        match self.triggers.try_send(trigger) {
-            Ok(()) => self.metrics.triggered(),
-            Err(TrySendError::Full(_)) => self.metrics.dropped(),
-            // The sender thread is gone; there is nothing left to report to.
-            Err(TrySendError::Disconnected(_)) => self.metrics.dropped(),
+        match self.latest.put(trigger) {
+            Handover::Waiting => self.metrics.triggered(),
+            // The sender was still busy with the last send. The trigger this
+            // one overtook was never going to be answered in time.
+            Handover::Displaced => {
+                self.metrics.triggered();
+                self.metrics.stale();
+            }
+            Handover::Lost => self.metrics.dropped(),
         }
     }
 
@@ -198,9 +289,10 @@ pub fn spawn(
     );
 
     let via = match config.fire_via {
-        FireVia::Rpc => Via::Rpc(RpcClient::new_with_timeout(
+        FireVia::Rpc => Via::Rpc(RpcClient::new_with_timeout_and_commitment(
             config.rpc_url.clone(),
             RPC_TIMEOUT,
+            COMMITMENT,
         )),
         FireVia::Tpu => Via::Tpu {
             tpus: LeaderTpus::spawn(config, &keypair, metrics.slots.clone(), exit.clone())?,
@@ -209,9 +301,9 @@ pub fn spawn(
     };
     let metrics = metrics.fire.clone();
 
-    let (triggers, receiver) = sync_channel(QUEUE_DEPTH);
+    let latest = Arc::new(Latest::new());
     let fire = Arc::new(Fire {
-        triggers,
+        latest: latest.clone(),
         pending: Mutex::new(VecDeque::new()),
         metrics: metrics.clone(),
     });
@@ -224,6 +316,8 @@ pub fn spawn(
     )?;
 
     let sender = Sender {
+        latest,
+        exit,
         via,
         keypair,
         searcher,
@@ -236,7 +330,7 @@ pub fn spawn(
     };
     thread::Builder::new()
         .name("fire".to_string())
-        .spawn(move || sender.run(receiver))
+        .spawn(move || sender.run())
         .map_err(|err| format!("failed to spawn fire thread: {err}"))?;
 
     Ok(Some(Firing { fire, searcher }))
@@ -251,6 +345,8 @@ enum Via {
 }
 
 struct Sender {
+    latest: Arc<Latest>,
+    exit: Arc<AtomicBool>,
     via: Via,
     keypair: Keypair,
     searcher: Address,
@@ -263,13 +359,16 @@ struct Sender {
 }
 
 impl Sender {
-    fn run(self, triggers: Receiver<Trigger>) {
+    fn run(self) {
         let span = tracing::info_span!("fire");
         let _guard = span.enter();
         let mut last_fired: Option<Instant> = None;
         let mut fired: u64 = 0;
 
-        while let Ok(trigger) = triggers.recv() {
+        while let Some(trigger) = self.latest.take(&self.exit) {
+            let Some(trigger) = fresh_enough(trigger, &self.metrics) else {
+                continue;
+            };
             if last_fired.is_some_and(|last| last.elapsed() < self.cooldown) {
                 self.metrics.skipped();
                 continue;
@@ -374,6 +473,23 @@ impl Sender {
     }
 }
 
+/// The trigger if it is still worth answering, `None` if it has aged out.
+///
+/// Being the only trigger there is does not make one worth sending. [`Latest`]
+/// has already thrown away everything this one overtook, but a send that
+/// outlasted the race leaves even the survivor addressed to a block that has
+/// since been built.
+///
+/// Counted as stale rather than skipped: a cooldown is a decision not to fire,
+/// and this is a fire that would have missed.
+fn fresh_enough(trigger: Trigger, metrics: &FireMetrics) -> Option<Trigger> {
+    if trigger.detected.elapsed() > MAX_TRIGGER_AGE {
+        metrics.stale();
+        return None;
+    }
+    Some(trigger)
+}
+
 /// The most recent blockhash, refreshed on a thread so that the send path never
 /// pays an RPC round trip it could have paid earlier.
 struct Blockhash {
@@ -396,7 +512,8 @@ impl Blockhash {
             .spawn(move || {
                 let span = tracing::info_span!("blockhash");
                 let _guard = span.enter();
-                let rpc = RpcClient::new_with_timeout(rpc_url, RPC_TIMEOUT);
+                let rpc =
+                    RpcClient::new_with_timeout_and_commitment(rpc_url, RPC_TIMEOUT, COMMITMENT);
                 let mut errored = false;
                 while !exit.load(Ordering::Relaxed) {
                     match rpc.get_latest_blockhash() {
@@ -434,5 +551,100 @@ impl Blockhash {
             .lock()
             .ok()
             .and_then(|current| current.map(|(_, fetched)| fetched.elapsed()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {super::*, opentelemetry::global, std::sync::atomic::AtomicBool};
+
+    fn metrics() -> Arc<FireMetrics> {
+        crate::metrics::Metrics::new(&global::meter("test"), FireVia::Rpc).fire
+    }
+
+    fn trigger(slot: u64, age: Duration) -> Trigger {
+        Trigger {
+            slot,
+            target: Signature::default(),
+            detected: Instant::now() - age,
+        }
+    }
+
+    /// Triggers that arrive while a send is in flight are all about the same
+    /// race, and the last of them knows the most about it. Holding them in
+    /// order would answer the oldest slot first — and then answer nothing else,
+    /// because the cooldown would cover the rest.
+    #[test]
+    fn a_new_trigger_takes_the_place_of_the_one_waiting() {
+        let latest = Latest::new();
+        let exit = AtomicBool::new(false);
+
+        assert!(matches!(
+            latest.put(trigger(10, Duration::ZERO)),
+            Handover::Waiting
+        ));
+        for slot in [11u64, 12] {
+            assert!(
+                matches!(
+                    latest.put(trigger(slot, Duration::ZERO)),
+                    Handover::Displaced
+                ),
+                "slot {slot} did not report displacing the one before it"
+            );
+        }
+
+        let taken = latest.take(&exit).expect("a trigger was waiting");
+        assert_eq!(
+            taken.slot, 12,
+            "the sender answered a slot it had left behind"
+        );
+    }
+
+    /// And nothing is left behind it: what the sender took is all there was.
+    #[test]
+    fn taking_the_trigger_empties_the_slot() {
+        let latest = Latest::new();
+        let exit = AtomicBool::new(false);
+        latest.put(trigger(10, Duration::ZERO));
+        assert!(latest.take(&exit).is_some());
+
+        exit.store(true, Ordering::Relaxed);
+        assert!(
+            latest.take(&exit).is_none(),
+            "a trigger came back out twice"
+        );
+    }
+
+    /// The sender has to come home when the sniper stops, and an idle one is
+    /// blocked on a condvar nobody is going to signal.
+    #[test]
+    fn an_idle_sender_stops_when_the_exit_flag_is_set() {
+        let latest = Arc::new(Latest::new());
+        let exit = Arc::new(AtomicBool::new(false));
+
+        let waiting = {
+            let (latest, exit) = (latest.clone(), exit.clone());
+            thread::spawn(move || latest.take(&exit).is_none())
+        };
+        thread::sleep(WAKE_INTERVAL / 2);
+        exit.store(true, Ordering::Relaxed);
+
+        assert!(
+            waiting.join().expect("the sender thread panicked"),
+            "a stopping sender came back with a trigger it never had"
+        );
+    }
+
+    /// Being the only trigger there is does not make one worth sending: a send
+    /// that outlasted the race leaves the survivor addressed to a block that
+    /// has since been built.
+    #[test]
+    fn a_trigger_older_than_a_slot_is_let_go() {
+        let metrics = metrics();
+        let stale = trigger(10, MAX_TRIGGER_AGE + Duration::from_millis(1));
+        assert!(fresh_enough(stale, &metrics).is_none());
+
+        let fresh = trigger(10, Duration::ZERO);
+        assert!(fresh_enough(fresh, &metrics).is_some());
     }
 }

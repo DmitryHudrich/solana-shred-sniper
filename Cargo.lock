@@ -5087,6 +5087,8 @@ dependencies = [
  "solana-quic-client",
  "solana-rpc-client",
  "solana-rpc-client-api",
+ "solana-sha256-hasher",
+ "solana-signature",
  "solana-signer",
  "solana-streamer",
  "solana-transaction",

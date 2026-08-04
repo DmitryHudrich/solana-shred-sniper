@@ -2,7 +2,10 @@
 //!
 //! All offsets here are relative to the shred *body*: the payload with its
 //! leading 64-byte signature stripped. Erasure recovery reconstructs bodies
-//! rather than payloads, so live and recovered shreds share one parser.
+//! rather than payloads, so live and recovered shreds share one parser. The one
+//! exception is [`signed`], which has to count from the packet, and says so.
+
+use {solana_hash::Hash, solana_sha256_hasher::hashv};
 
 const SIGNATURE: usize = 64;
 
@@ -28,9 +31,19 @@ const CODE_HEADERS: usize = 89 - SIGNATURE;
 // signature. The shard is therefore longest for an unresigned shred with an
 // empty proof.
 const CODE_PAYLOAD: usize = 1228;
+/// A data shred's packet. Both types are cut so that their erasure coded
+/// regions match, which leaves the data payload shorter than the coding one by
+/// exactly the coding headers that are not covered.
+const DATA_PAYLOAD: usize = CODE_PAYLOAD - CODE_HEADERS;
 const MERKLE_ROOT: usize = 32;
 const PROOF_ENTRY: usize = 20;
 const MAX_SHARD: usize = CODE_PAYLOAD - (SIGNATURE + CODE_HEADERS) - MERKLE_ROOT;
+
+/// Domain separators agave hashes the Merkle tree with. A leaf and a node of
+/// the same bytes must not hash alike, or a proof could be replayed at the
+/// wrong height.
+const MERKLE_LEAF_PREFIX: &[u8] = b"\x00SOLANA_MERKLE_SHREDS_LEAF";
+const MERKLE_NODE_PREFIX: &[u8] = b"\x01SOLANA_MERKLE_SHREDS_NODE";
 
 const FLAG_DATA_COMPLETE: u8 = 0b0100_0000;
 
@@ -46,10 +59,12 @@ const FLAG_LAST_IN_SLOT: u8 = 0b1100_0000;
 /// without a second source of truth.
 const TICK_REFERENCE_MASK: u8 = 0b0011_1111;
 
-// Shreds carry no signature we can check, so every field is attacker
-// controlled. A leader never puts more than this many data shreds in a slot
-// (agave's MAX_DATA_SHREDS_PER_SLOT), and everything downstream sizes its
-// bookkeeping by the index, so a bogus one has to be rejected here.
+// Parsing happens before anything is verified, so at this point every field is
+// still only what the packet claims. A leader never puts more than this many
+// data shreds in a slot (agave's MAX_DATA_SHREDS_PER_SLOT), and everything
+// downstream sizes its bookkeeping by the index, so a bogus one has to be
+// rejected here rather than left to [`signed`] — which cannot run at all on a
+// shred whose own fields do not fit the packet.
 const MAX_SHREDS_PER_SLOT: u32 = 32_768;
 
 #[derive(Debug)]
@@ -170,6 +185,77 @@ fn shard_len(variant: u8) -> Option<usize> {
         .filter(|shard_len| *shard_len > DATA_HEADERS)
 }
 
+/// What a shred says about who produced it: the leader's signature, and the
+/// Merkle root it was made over.
+///
+/// The signature covers the root of the erasure batch's Merkle tree, not the
+/// shred, so every shred of a batch carries the same one — checking a batch
+/// costs one verification rather than thirty-two. The root is not on the wire
+/// either; it is rebuilt from the shred's own bytes and the proof it carries,
+/// which is what makes a forged shred fail: to pass, it would have to hash to a
+/// root the leader had already signed.
+pub struct Signed<'a> {
+    pub signature: &'a [u8],
+    pub root: Hash,
+}
+
+/// Offsets from the start of the *packet*, unlike the rest of this module: the
+/// Merkle leaf is hashed over the payload from the signature to the proof, so
+/// both ends have to be counted from the same place.
+fn proof_offset(variant: u8) -> Option<usize> {
+    let proof = usize::from(variant & 0x0f) * PROOF_ENTRY;
+    let resigned = matches!(variant & 0xf0, 0x70 | 0xb0);
+    let payload = match variant & 0xf0 {
+        0x90 | 0xb0 => DATA_PAYLOAD,
+        0x60 | 0x70 => CODE_PAYLOAD,
+        _ => return None,
+    };
+    payload.checked_sub(proof + if resigned { SIGNATURE } else { 0 })
+}
+
+/// Rebuilds the Merkle root the leader signed, from the shred and its proof.
+///
+/// Nothing here trusts the shred: every offset is bounds checked and a proof
+/// that does not fit the packet gives no root at all. A shred that has been
+/// tampered with yields *a* root, just not the signed one — which is the point,
+/// and why the verification this feeds cannot be fooled by rewriting fields.
+pub fn signed(packet: &[u8], shred_version: u16) -> Option<Signed<'_>> {
+    let body = packet.get(SIGNATURE..)?;
+    if !version_matches(body, shred_version) {
+        return None;
+    }
+    let variant = *body.first()?;
+    let proof_offset = proof_offset(variant)?;
+    let proof =
+        packet.get(proof_offset..proof_offset + usize::from(variant & 0x0f) * PROOF_ENTRY)?;
+
+    // Which leaf of the batch's tree this shred is. Data shreds come first, in
+    // index order; coding shreds follow, in position order.
+    let fec_set_index = read_u32(body, FEC_SET_INDEX)?;
+    let mut index = match variant & 0xf0 {
+        0x90 | 0xb0 => read_u32(body, INDEX)?
+            .checked_sub(fec_set_index)
+            .map(|leaf| leaf as usize)?,
+        _ => read_u16(body, CODE_NUM_DATA)?.checked_add(read_u16(body, CODE_POSITION)?)?,
+    };
+
+    let mut node = hashv(&[MERKLE_LEAF_PREFIX, packet.get(SIGNATURE..proof_offset)?]);
+    for sibling in proof.chunks_exact(PROOF_ENTRY) {
+        let (left, right) = if index % 2 == 0 {
+            (&node.as_ref()[..PROOF_ENTRY], sibling)
+        } else {
+            (sibling, &node.as_ref()[..PROOF_ENTRY])
+        };
+        node = hashv(&[MERKLE_NODE_PREFIX, left, right]);
+        index >>= 1;
+    }
+
+    Some(Signed {
+        signature: packet.get(..SIGNATURE)?,
+        root: node,
+    })
+}
+
 fn read_u16(body: &[u8], offset: usize) -> Option<usize> {
     let bytes = body.get(offset..offset + 2)?.try_into().ok()?;
     Some(usize::from(u16::from_le_bytes(bytes)))
@@ -194,10 +280,103 @@ mod tests {
         solana_ledger::shred::{
             ProcessShredsStats, ReedSolomonCache, Shred as AgaveShred, Shredder,
         },
+        solana_signer::Signer,
     };
 
     /// Whatever a cluster would hash out; the point is that it is not zero.
     const SHRED_VERSION: u16 = 4242;
+
+    /// Every shred of a slot, data and coding, as the leader emits them, with
+    /// the keypair that signed them.
+    fn signed_slot(resigned: bool) -> (Keypair, Vec<Vec<u8>>) {
+        let leader = Keypair::new();
+        let payload: Vec<u8> = (0..40 * 1024u32).map(|byte| byte as u8).collect();
+        let shreds = Shredder::new(42, 41, 0, SHRED_VERSION)
+            .unwrap()
+            .make_shreds_from_data_slice(
+                &leader,
+                &payload,
+                resigned,
+                Hash::default(),
+                0,
+                0,
+                &ReedSolomonCache::default(),
+                &mut ProcessShredsStats::default(),
+            )
+            .unwrap()
+            .map(|shred| shred.payload().to_vec())
+            .collect();
+        (leader, shreds)
+    }
+
+    /// The root is rebuilt from the shred's own bytes rather than read off the
+    /// wire, so the only thing that says the reconstruction is right is agave
+    /// arriving at the same hash from the same packet.
+    #[test]
+    fn rebuilds_the_merkle_root_agave_signed() {
+        for resigned in [false, true] {
+            let (_, shreds) = signed_slot(resigned);
+            let mut data = 0;
+            let mut coding = 0;
+            for payload in &shreds {
+                let ours = signed(payload, SHRED_VERSION).expect("a shred should be signed");
+                let theirs = solana_ledger::shred::layout::get_merkle_root(payload)
+                    .expect("agave should find a root");
+                assert_eq!(ours.root, theirs, "the rebuilt root differs from agave's");
+                match AgaveShred::new_from_serialized_shred(payload.clone())
+                    .unwrap()
+                    .is_data()
+                {
+                    true => data += 1,
+                    false => coding += 1,
+                }
+            }
+            assert!(
+                data > 0 && coding > 0,
+                "both shred types have to be covered"
+            );
+        }
+    }
+
+    /// The whole point of the root: it is what the leader signed, so a shred
+    /// from anyone else fails against the leader the slot was scheduled to.
+    #[test]
+    fn the_leader_signature_verifies_against_the_root() {
+        let (leader, shreds) = signed_slot(false);
+        let payload = &shreds[0];
+        let signed = signed(payload, SHRED_VERSION).unwrap();
+        let signature = solana_signature::Signature::try_from(signed.signature).unwrap();
+        assert!(
+            signature.verify(leader.pubkey().as_ref(), signed.root.as_ref()),
+            "the leader's own shred did not verify"
+        );
+        assert!(
+            !signature.verify(Keypair::new().pubkey().as_ref(), signed.root.as_ref()),
+            "a shred verified against someone who never signed it"
+        );
+    }
+
+    /// A rewritten field changes the leaf it is hashed into, so the root moves
+    /// and the signature the shred still carries no longer fits it. This is the
+    /// property the whole check rests on.
+    #[test]
+    fn a_tampered_shred_no_longer_matches_its_signature() {
+        let (leader, shreds) = signed_slot(false);
+        let payload = &shreds[0];
+        let honest = signed(payload, SHRED_VERSION).unwrap().root;
+
+        // The flag byte, which is what a forged batch boundary would need.
+        let mut tampered = payload.clone();
+        tampered[SIGNATURE + DATA_FLAGS] ^= FLAG_DATA_COMPLETE;
+        let forged = signed(&tampered, SHRED_VERSION).unwrap();
+        assert_ne!(forged.root, honest, "flipping a flag left the root alone");
+
+        let signature = solana_signature::Signature::try_from(forged.signature).unwrap();
+        assert!(
+            !signature.verify(leader.pubkey().as_ref(), forged.root.as_ref()),
+            "a tampered shred still verified as the leader's"
+        );
+    }
 
     /// One data shred, straight from the shredder a leader would use.
     fn data_shred() -> Vec<u8> {

@@ -57,6 +57,14 @@ impl<K: Eq + Hash, V> AgedMap<K, V> {
         self.entries.get_mut(key).map(|aged| &mut aged.value)
     }
 
+    /// Every entry still held. The cap drops entries without handing them to
+    /// [`Self::sweep`]'s callback, so a caller keeping a running total over the
+    /// values has no way to decrement it on the way out and has to rebuild it
+    /// from what is left.
+    pub fn values(&self) -> impl Iterator<Item = &V> {
+        self.entries.values().map(|aged| &aged.value)
+    }
+
     /// The entry under `key`, created if absent, stamped as touched either way.
     pub fn upsert(&mut self, key: K, now: Instant, create: impl FnOnce() -> V) -> &mut V {
         let aged = self.entries.entry(key).or_insert_with(|| Aged {

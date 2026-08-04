@@ -35,6 +35,20 @@ use {
 /// that cost; steady state needs one buffer per slot inside the window.
 const MAX_BUFFERED_SLOTS: usize = 128;
 
+/// Entry bytes one slot may hold. The caps above and in [`crate::shred`] bound
+/// how many buffers and how many indices an unauthenticated sender can touch,
+/// but nothing bounded what they hold: 32k indices at a kilobyte apiece is
+/// 36 MB in a single slot, for a sender that only has to know our address. A
+/// mainnet block runs to a megabyte or two, so this leaves several times what
+/// a leader produces and still refuses the rest.
+const MAX_SLOT_BYTES: usize = 8 * 1024 * 1024;
+
+/// Entry bytes across every slot held, because the cap above multiplied by the
+/// slot cap is a gigabyte. Steady state is the retention window's worth of real
+/// blocks — some tens of slots at a megabyte or two — so this is several times
+/// what the sniper needs and a fraction of what it could be made to hold.
+const MAX_BUFFERED_BYTES: usize = 512 * 1024 * 1024;
+
 /// An arena is rebuilt once the bytes stranded in it outweigh what is still
 /// live. The floor keeps a slot that has seen a shred or two from compacting on
 /// every duplicate, where copying costs more than the bytes it reclaims.
@@ -77,6 +91,7 @@ enum Payload {
 /// How far the run of shreds beginning at a batch's first index reaches, and
 /// where its bytes sit. Everything up to the first gap is readable, whether or
 /// not the shred that closes the batch has turned up.
+#[derive(Clone, Copy)]
 struct Extent {
     /// Highest index in the run.
     last: u32,
@@ -106,6 +121,15 @@ struct Progress {
     /// Nothing more will come out of this batch: either every entry it declared
     /// was decoded, or its bytes turned out not to be entries at all.
     closed: bool,
+    /// How far the run reached when it was last walked. A run only ever grows
+    /// forward, so the next walk resumes at the frontier instead of retracing
+    /// the shreds behind it — without this a batch of `n` shreds costs `n`
+    /// steps for every one of them.
+    extent: Option<Extent>,
+    /// Where reading picks up: the first shred whose bytes have not all become
+    /// entries, and the offset at which it begins in the batch. Kept for the
+    /// same reason as `extent`, for the walk that skips what is already read.
+    resume: Option<(u32, usize)>,
 }
 
 /// What one shred did for the batch it belongs to.
@@ -208,7 +232,33 @@ impl SlotBuffer {
         if data_complete {
             self.starts.insert(index + 1);
         }
+        if duplicate {
+            self.invalidate(index);
+        }
         duplicate
+    }
+
+    /// Throws away what was learned by walking over a shred that has just been
+    /// replaced. Everything the walk carries forward — how long the run is, how
+    /// many of its bytes are read, whether it ends at a terminator — was
+    /// measured over the copy that is now gone, and the new one may differ in
+    /// all three. Duplicates are rare enough that starting the walk over costs
+    /// less than unpicking it.
+    fn invalidate(&mut self, index: u32) {
+        for start in self.candidates(index).into_iter().flatten() {
+            if let Some(progress) = self.progress.get_mut(&start) {
+                progress.extent = None;
+                progress.resume = None;
+            }
+        }
+    }
+
+    /// Arena bytes a held shred still points at. What the arena has grown to is
+    /// a different number — it carries whatever duplicates stranded until the
+    /// next compaction — and it is this one the budget is kept in, so that
+    /// reclaiming bytes is not mistaken for holding fewer.
+    fn live(&self) -> usize {
+        self.arena.len() - self.stale
     }
 
     /// Puts a shred's entry bytes in the arena and says where they landed.
@@ -269,7 +319,10 @@ impl SlotBuffer {
         if progress.closed {
             return None;
         }
-        let extent = self.extent(start)?;
+        let extent = self.extent(start, progress.extent)?;
+        // Kept whether or not this pass reads anything, since what it is for is
+        // sparing the next one the walk.
+        progress.extent = Some(extent);
         // Nothing new to read, and no terminator to force a verdict on what has
         // been read so far.
         if extent.len <= progress.consumed && !extent.complete {
@@ -277,7 +330,7 @@ impl SlotBuffer {
         }
 
         let mut entries = Vec::new();
-        let (payload, base) = self.payload(start, &extent, progress.consumed);
+        let (payload, base) = self.payload(start, &extent, progress);
         let bytes = match &payload {
             Payload::Arena { at, len } => &self.arena[*at..*at + *len],
             Payload::Stitched(stitched) => stitched.as_slice(),
@@ -320,12 +373,23 @@ impl SlotBuffer {
     /// Walks the run of consecutive shreds beginning at `start`, which is as
     /// much of the batch as has arrived. A gap ends the walk, and so does the
     /// data-complete shred that closes the batch.
-    fn extent(&self, start: u32) -> Option<Extent> {
-        let mut index = start;
-        let mut first_received: Option<Instant> = None;
-        let mut recovered = false;
+    ///
+    /// `cached` is where an earlier walk of this same run stopped. A run grows
+    /// only at its far end and the shreds already crossed cannot change under
+    /// it — a duplicate that would change one drops the cache — so the walk
+    /// resumes at the frontier and every shred of a batch is crossed once
+    /// rather than once per shred that follows it.
+    fn extent(&self, start: u32, cached: Option<Extent>) -> Option<Extent> {
+        // A run that has reached its terminator is all there will ever be of
+        // the batch, so there is nothing left to walk.
+        if matches!(&cached, Some(extent) if extent.complete) {
+            return cached;
+        }
+        let mut index = cached.map_or(start, |extent| extent.last + 1);
+        let mut first_received: Option<Instant> = cached.map(|extent| extent.first_received);
+        let mut recovered = cached.is_some_and(|extent| extent.recovered);
         let mut complete = false;
-        let mut len = 0;
+        let mut len = cached.map_or(0, |extent| extent.len);
 
         while let Some(shred) = self.shreds.get(&index) {
             len += shred.len as usize;
@@ -358,17 +422,19 @@ impl SlotBuffer {
     /// scratch on every shred: what has to be copied is the undecoded tail, not
     /// the whole batch. A run laid end to end in the arena — which is what
     /// in-order delivery produces — is read where it lies and copied not at all.
-    fn payload(&self, start: u32, extent: &Extent, consumed: usize) -> (Payload, usize) {
-        let mut base = 0;
-        let mut from = start;
+    fn payload(&self, start: u32, extent: &Extent, progress: &mut Progress) -> (Payload, usize) {
+        // Resuming where the last pass stopped rather than at the batch's first
+        // shred: the shreds behind that point are read and stay read.
+        let (mut from, mut base) = progress.resume.unwrap_or((start, 0));
         while from <= extent.last {
             let len = self.shreds[&from].len as usize;
-            if base + len > consumed {
+            if base + len > progress.consumed {
                 break;
             }
             base += len;
             from += 1;
         }
+        progress.resume = Some((from, base));
         // Every byte held has been read already. There is nothing to hand the
         // decoder, but it is still owed the chance to say the batch is short.
         if from > extent.last {
@@ -416,6 +482,10 @@ impl SlotBuffer {
 
 pub struct Assembler {
     slots: AgedMap<u64, SlotBuffer>,
+    /// Entry bytes held across every slot. Kept as a running total because the
+    /// budget has to be answered on the packet path, and resynced on each sweep
+    /// so that slots let go without passing through it cannot drift it upwards.
+    bytes: usize,
     metrics: Arc<AssemblerMetrics>,
 }
 
@@ -423,6 +493,7 @@ impl Assembler {
     pub fn new(retention: Duration, metrics: Arc<AssemblerMetrics>) -> Self {
         Self {
             slots: AgedMap::new(retention, MAX_BUFFERED_SLOTS, "slot buffers"),
+            bytes: 0,
             metrics,
         }
     }
@@ -438,11 +509,29 @@ impl Assembler {
         let now = Instant::now();
         self.sweep(now);
 
+        // Nothing signs a shred, so the sender of one is only ever a claim, and
+        // the memory it asks for is the one cost that outlives the packet. The
+        // budget is answered before the bytes are taken rather than after,
+        // because after is where the machine is already out of them.
+        if self.bytes + shred.data.len() > MAX_BUFFERED_BYTES {
+            self.metrics.over_budget();
+            return Vec::new();
+        }
+
         let buffer = self.slots.upsert(shred.slot, now, SlotBuffer::new);
+        if buffer.live() + shred.data.len() > MAX_SLOT_BYTES {
+            self.metrics.over_budget();
+            return Vec::new();
+        }
         if shred.last_in_slot {
             buffer.last_index = Some(shred.index);
         }
-        if buffer.insert(shred.index, shred.data, shred.data_complete, now, recovered) {
+        let held = buffer.live();
+        let duplicate = buffer.insert(shred.index, shred.data, shred.data_complete, now, recovered);
+        // The shred's own length is not the delta: a duplicate frees whatever
+        // the copy it displaced was holding.
+        self.bytes = self.bytes + buffer.live() - held;
+        if duplicate {
             self.metrics.duplicate();
         }
 
@@ -488,7 +577,12 @@ impl Assembler {
             }
         });
         if swept {
+            // Slots the cap gives up on never reach the callback above, so the
+            // total is rebuilt from what is left rather than decremented on the
+            // way out. Once a sweep, over some tens of slots.
+            self.bytes = self.slots.values().map(SlotBuffer::live).sum();
             self.metrics.set_buffered_slots(self.slots.len() as u64);
+            self.metrics.set_buffered_bytes(self.bytes as u64);
         }
     }
 }
@@ -776,9 +870,9 @@ mod tests {
             buffer.insert(index, &[index as u8; 4], index == 2, now, false);
         }
 
-        let extent = buffer.extent(0).expect("the run begins at zero");
+        let extent = buffer.extent(0, None).expect("the run begins at zero");
         assert!(extent.complete, "shred two closed the batch");
-        let (payload, base) = buffer.payload(0, &extent, 0);
+        let (payload, base) = buffer.payload(0, &extent, &mut Progress::default());
         assert_eq!(base, 0, "nothing had been read yet");
         let bytes = match &payload {
             Payload::Arena { at, len } => buffer.arena[*at..*at + *len].to_vec(),
@@ -837,6 +931,90 @@ mod tests {
             opened + feed(&mut assembler, SLOT, &payload, false),
             expected
         );
+    }
+
+    /// Bounding the buffers and the indices a sender can touch says nothing
+    /// about what they hold. Every index a leader could use, filled with as
+    /// much as a shred carries, is tens of megabytes in a single slot — and
+    /// the sender of a shred is never checked.
+    #[test]
+    fn one_slot_cannot_be_filled_past_its_budget() {
+        let mut assembler = assembler();
+        let data = vec![0u8; 1024];
+        let attempted = 32_768usize;
+        for index in 0..attempted as u32 {
+            assembler.insert(&shred(SLOT, index, &data, false), false);
+        }
+
+        assert!(
+            attempted * data.len() > 2 * MAX_SLOT_BYTES,
+            "the attempt has to overshoot the budget to prove anything"
+        );
+        let held = assembler.slots.get(&SLOT).unwrap().live();
+        assert!(
+            held <= MAX_SLOT_BYTES,
+            "{held} bytes held against a budget of {MAX_SLOT_BYTES}"
+        );
+        assert_eq!(assembler.bytes, held, "the running total drifted");
+    }
+
+    /// The budget has to be answered across slots too: the per-slot cap
+    /// multiplied by the number of buffers is far more memory than the machine
+    /// has, and a spoofed slot number is free.
+    #[test]
+    fn a_full_budget_refuses_shreds_it_would_otherwise_decode() {
+        let (payload, expected) = batch(1, 1);
+        assert!(expected > 0, "the payload has to be worth something");
+
+        let mut assembler = assembler();
+        assembler.bytes = MAX_BUFFERED_BYTES;
+        let refused = assembler.insert(&shred(SLOT, 0, &payload, true), false);
+        assert!(
+            refused.is_empty(),
+            "a refused shred still handed over entries"
+        );
+        assert!(
+            assembler.slots.get(&SLOT).is_none(),
+            "a refused shred was buffered anyway"
+        );
+
+        // The same shred against a clear budget, so what stopped it above was
+        // the budget rather than anything about the payload.
+        assembler.bytes = 0;
+        let taken = assembler.insert(&shred(SLOT, 0, &payload, true), false);
+        assert_eq!(count(&taken), expected);
+    }
+
+    /// A duplicate hands back what the copy it displaced was holding. Counting
+    /// it as more would let one index, resent, fill the budget on its own.
+    #[test]
+    fn duplicates_do_not_fill_the_budget() {
+        let mut assembler = assembler();
+        let data = vec![7u8; 1024];
+        for _ in 0..4096 {
+            assembler.insert(&shred(SLOT, 0, &data, false), false);
+        }
+        assert_eq!(
+            assembler.bytes,
+            data.len(),
+            "one shred resent read as the assembler filling up"
+        );
+    }
+
+    /// Slots given up on by the cap never pass through the sweep's callback, so
+    /// a total only ever decremented on the way out would climb until it
+    /// refused everything.
+    #[test]
+    fn the_budget_matches_what_is_actually_held() {
+        let mut assembler = assembler();
+        let data = vec![3u8; 512];
+        for slot in 0..8 * MAX_BUFFERED_SLOTS as u64 {
+            assembler.insert(&shred(slot, 0, &data, false), false);
+        }
+
+        let held: usize = assembler.slots.values().map(SlotBuffer::live).sum();
+        assert!(held > 0, "everything was swept, which proves nothing");
+        assert_eq!(assembler.bytes, held, "the running total drifted");
     }
 
     /// Spoofed slots can still cost memory until they age out, so the number
@@ -962,8 +1140,16 @@ mod tests {
             buffer.insert(index, &[index as u8; 100], index == 3, now, false);
         }
 
-        let extent = buffer.extent(0).expect("the run begins at zero");
-        let (whole, base) = buffer.payload(0, &extent, 0);
+        let extent = buffer.extent(0, None).expect("the run begins at zero");
+        // A progress of its own per case: what has been read only ever moves
+        // forward, so these are three batches at three points, not one batch
+        // read backwards.
+        let read = |consumed: usize| Progress {
+            consumed,
+            ..Progress::default()
+        };
+
+        let (whole, base) = buffer.payload(0, &extent, &mut read(0));
         assert_eq!(base, 0);
         assert!(
             matches!(&whole, Payload::Stitched(bytes) if bytes.len() == 400),
@@ -971,7 +1157,7 @@ mod tests {
         );
 
         // Two shreds in, only the two behind them are worth copying.
-        let (tail, base) = buffer.payload(0, &extent, 200);
+        let (tail, base) = buffer.payload(0, &extent, &mut read(200));
         assert_eq!(base, 200, "the tail begins where the reading stopped");
         assert!(
             matches!(&tail, Payload::Stitched(bytes) if bytes.len() == 200),
@@ -979,9 +1165,50 @@ mod tests {
         );
 
         // Part way into a shred, that shred is still needed whole.
-        let (straddled, base) = buffer.payload(0, &extent, 150);
+        let (straddled, base) = buffer.payload(0, &extent, &mut read(150));
         assert_eq!(base, 100, "the shred holding the next entry starts at 100");
         assert!(matches!(&straddled, Payload::Stitched(bytes) if bytes.len() == 300));
+    }
+
+    /// The point of carrying the walk between shreds: a batch of `n` shreds is
+    /// crossed once, not once per shred. Both walks have to move — the run's
+    /// frontier and the point reading resumes at — or a long batch costs the
+    /// square of its length to take in.
+    #[test]
+    fn a_batch_is_walked_once_rather_than_once_per_shred() {
+        // How far behind the run's end the two walks start on the last shred of
+        // a batch of `entries`. Both have to be a constant: it is their growing
+        // with the batch that made a batch cost the square of its length.
+        let lag = |entries: usize| -> (usize, usize) {
+            let (payload, expected) = batch(entries, 1);
+            let chunks: Vec<&[u8]> = payload.chunks(64).collect();
+            let last = chunks.len() - 1;
+            assert!(last > 16, "a short batch would not show the difference");
+
+            let mut assembler = assembler();
+            let mut released = 0;
+            for (index, data) in chunks.into_iter().enumerate() {
+                let shred = shred(SLOT, index as u32, data, index == last);
+                released += count(&assembler.insert(&shred, false));
+            }
+            assert_eq!(released, expected, "the batch still has to come out whole");
+
+            let progress = &assembler.slots.get(&SLOT).unwrap().progress[&0];
+            let extent = progress.extent.expect("the run was walked");
+            assert_eq!(extent.last as usize, last, "the frontier reached the end");
+            let (from, _) = progress.resume.expect("reading left a resume point");
+            // The frontier is walked before this shred's bytes are read and the
+            // resume point is set before they are decoded, so both are a pass
+            // behind rather than at the end.
+            (last - extent.last as usize, last - from as usize)
+        };
+
+        let short = lag(64);
+        let long = lag(1024);
+        assert_eq!(
+            short, long,
+            "the walks start further back on the longer batch: {short:?} against {long:?}"
+        );
     }
 
     /// Bytes that are not entries have to be given up on rather than retried

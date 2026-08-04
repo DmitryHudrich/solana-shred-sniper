@@ -405,6 +405,105 @@ mod tests {
         );
     }
 
+    /// The batch that closes a slot is resigned: every shred in it carries a
+    /// retransmitter signature, so its shard is 64 bytes shorter than an
+    /// unsigned batch's. That is a live format on mainnet today, not a future
+    /// one, and recovery there is the only path that exercises the `-64` arm of
+    /// `shard_len`. Get that length wrong and the data and coding shards are cut
+    /// to a size the leader never coded over, so Reed-Solomon reconstructs the
+    /// batch into quiet garbage instead of failing — the one outcome nothing
+    /// downstream would notice.
+    #[test]
+    fn recovers_data_shreds_from_the_resigned_last_batch() {
+        use solana_ledger::shred::layout;
+
+        let (payload, data, coding) = shred(60 * 1024);
+
+        // The last batch is the one with the highest set index; the payload has
+        // to span more than one so that batch is distinct and only it resigns.
+        let last_set = data
+            .iter()
+            .map(AgaveShred::fec_set_index)
+            .max()
+            .expect("a payload this size produces data shreds");
+        assert!(
+            data.iter().any(|shred| shred.fec_set_index() < last_set),
+            "the payload has to span more than one batch"
+        );
+
+        // Prove we are on the resigned path. Without this the test could be
+        // quietly recovering an ordinary batch and prove nothing about `-64`.
+        assert!(
+            data.iter()
+                .chain(coding.iter())
+                .filter(|shred| shred.fec_set_index() == last_set)
+                .all(
+                    |shred| layout::is_retransmitter_signed_variant(shred.payload())
+                        .expect("a merkle shred has a variant")
+                ),
+            "the batch that closes the slot should be resigned"
+        );
+
+        let dropped: Vec<&AgaveShred> = data
+            .iter()
+            .filter(|shred| shred.fec_set_index() == last_set)
+            .take(2)
+            .collect();
+        assert_eq!(dropped.len(), 2, "the last batch needs shreds to drop");
+        let dropped_indexes: Vec<u32> = dropped.iter().map(|shred| shred.index()).collect();
+
+        let mut recovery = recovery();
+        let mut recovered = Vec::new();
+        for shred in data
+            .iter()
+            .filter(|shred| !dropped_indexes.contains(&shred.index()))
+            .chain(coding.iter())
+        {
+            recovered.extend(match shred::parse(shred.payload(), SHRED_VERSION) {
+                Some(Shred::Data(shred)) => recovery.insert_data(&shred),
+                Some(Shred::Coding(shred)) => recovery.insert_coding(&shred),
+                None => panic!("shred did not parse"),
+            });
+        }
+
+        assert_eq!(
+            recovered.len(),
+            dropped.len(),
+            "the resigned batch did not recover; a wrong shard length would size \
+             the data shards past the coding shards and drop them from the batch"
+        );
+        for shred in &dropped {
+            let Some(Shred::Data(expected)) = shred::parse(shred.payload(), SHRED_VERSION) else {
+                panic!("data shred did not parse");
+            };
+            let actual = recovered
+                .iter()
+                .filter_map(|body| shred::parse_data(body, SHRED_VERSION))
+                .find(|actual| actual.index == expected.index)
+                .expect("shred was not recovered");
+
+            // A shard cut one signature too long recovers its coded prefix but
+            // fills the trailing 64 bytes with whatever Reed-Solomon solves them
+            // to, so a byte-for-byte shard match is what rules that out.
+            assert_eq!(actual.shard, expected.shard, "recovered shard differs");
+            assert_eq!(actual.data, expected.data, "recovered data differs");
+        }
+
+        // And the kept shreds plus the recovered ones still add back up to the
+        // leader's payload across both the plain and the resigned batch.
+        let kept = data
+            .iter()
+            .filter(|shred| !dropped_indexes.contains(&shred.index()))
+            .filter_map(|shred| match shred::parse(shred.payload(), SHRED_VERSION) {
+                Some(Shred::Data(shred)) => Some(shred),
+                _ => None,
+            });
+        let filled = recovered
+            .iter()
+            .filter_map(|body| shred::parse_data(body, SHRED_VERSION));
+        assert_eq!(reassemble(kept.chain(filled)), payload);
+    }
+
     #[test]
     fn gives_up_when_the_batch_is_beyond_repair() {
         let (_, data, coding) = shred(40 * 1024);

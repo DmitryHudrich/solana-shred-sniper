@@ -25,6 +25,8 @@ solana-quic-client = "4.1"
 solana-net-utils = "4.1"
 solana-rpc-client = "4.1"
 solana-rpc-client-api = "4.1"
+solana-sha256-hasher = "3"
+solana-signature = { version = "3", features = ["verify"] }
 solana-signer = "3"
 solana-streamer = { version = "4.1", features = ["agave-unstable-api"] }
 solana-transaction = { version = "4.1", features = ["serde"] }

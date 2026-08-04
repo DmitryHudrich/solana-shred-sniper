@@ -13,6 +13,7 @@ mod race;
 mod receiver;
 mod shred;
 mod tpu;
+mod verify;
 
 use {
     config::Config,
@@ -112,15 +113,17 @@ fn run(config: Config) -> Result<(), Box<dyn Error>> {
         exit.clone(),
         metrics.clone(),
     )?;
-    // Pointless without an exporter to publish through, so it follows the
-    // metrics switch as well as its own.
-    if config.leader_schedule_enabled && config.metrics_enabled {
-        leaders::spawn(config.rpc_url.clone(), metrics.slots.clone(), exit.clone())?;
-    }
+    // The schedule is what says which validator should have produced a slot,
+    // and so the only thing that can tell that validator's shreds from anyone
+    // else's. Without it the sniper still runs, on trust.
+    let schedule = config
+        .leader_schedule_enabled
+        .then(|| leaders::spawn(config.rpc_url.clone(), metrics.slots.clone(), exit.clone()))
+        .transpose()?;
 
     let firing = fire::spawn(&config, &metrics, exit.clone())?;
 
-    let mut pipeline = Pipeline::new(&config, shred_version, metrics.clone(), firing);
+    let mut pipeline = Pipeline::new(&config, shred_version, metrics.clone(), firing, schedule);
     for batch in batches {
         metrics.queue.popped(batch.received().len() as u64);
         for packet in batch.received() {
