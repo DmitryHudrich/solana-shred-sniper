@@ -80,6 +80,7 @@ the `sniper` service of `infra/docker-compose.yml`. The ones that matter most:
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `ENTRYPOINT` | `172.28.0.11:8001` | validator gossip address |
+| `NODE_KEYPAIR` | unset | gossip identity; unset means a fresh one per run |
 | `ADVERTISE_IP` | `172.28.0.1` | address validators send turbine to |
 | `RPC_URL` | `http://172.28.0.11:8899` | leader schedule and blockhash source |
 | `SNIPE_PROGRAM` | unset | base58 program id to flag on sight |

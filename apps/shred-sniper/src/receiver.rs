@@ -26,9 +26,18 @@ use {
 /// exactly what a single `recv_from` used to.
 const RECV_BATCH: usize = PACKETS_PER_BATCH;
 
-/// Batches a receiver may hold before it has to allocate. Deep enough to ride
-/// out a hiccup in the parser, shallow enough that the steady state is a
-/// handful of buffers going back and forth.
+/// Batches a receiver owns, for good: the pool is allocated at startup and
+/// never grows. Deep enough to ride out a hiccup in the parser, shallow enough
+/// that the steady state is a handful of buffers going back and forth.
+///
+/// This is also the only thing bounding how much a receiver can have in flight,
+/// which is what makes the number load-bearing rather than a tuning knob. A
+/// receiver that allocated its way past an empty pool would turn a parser that
+/// cannot keep up into unbounded memory growth — the queue between them has no
+/// bound of its own — and the process would die of that some seconds later
+/// rather than of the overload that caused it. Waiting instead pushes the
+/// backlog into the socket, where the kernel drops datagrams and counts them,
+/// and `sniper.node.udp_drops` says so.
 const POOL_BATCHES: usize = 4;
 
 /// `recvmmsg` blocks until a datagram lands, so without a timeout the exit flag
@@ -162,16 +171,26 @@ fn receive(
     let mut spare: Option<Batch> = None;
 
     while !exit.load(Ordering::Relaxed) {
-        // An exhausted pool means the parser is behind. Allocating instead of
-        // waiting keeps the socket drained, and the extra buffer joins the pool
-        // once it comes back.
-        let mut batch = spare
-            .take()
-            .or_else(|| recycled.try_recv().ok())
-            .unwrap_or_else(|| {
+        // An exhausted pool means the parser is behind, and there is nothing
+        // useful to do about that here: reading a datagram we have nowhere to
+        // put only moves the backlog from the kernel into this process. So the
+        // socket is left to fill, which is a state the kernel already counts.
+        // The wait is bounded so the exit flag still gets looked at.
+        let mut batch = match spare.take().or_else(|| recycled.try_recv().ok()) {
+            Some(batch) => batch,
+            None => {
                 metrics.pool_exhausted();
-                Batch::new(index)
-            });
+                match recycled.recv_timeout(RECV_TIMEOUT) {
+                    Ok(batch) => batch,
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    // The parser is gone and no buffer is ever coming back.
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        debug!("parser dropped, shutting down");
+                        break;
+                    }
+                }
+            }
+        };
 
         match recv_mmsg(&socket, &mut batch.packets) {
             Ok(0) => spare = Some(batch),
@@ -198,6 +217,35 @@ fn receive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exit flag is the only thing that ends a receiver, and the parse loop
+    /// ends when every receiver has hung up — so a receiver that missed the flag
+    /// would keep the whole process alive, and the signal handler that sets it
+    /// would achieve nothing. The wait is what makes this worth a test: a
+    /// receiver blocked on an empty pool has to notice the flag too.
+    #[test]
+    fn setting_the_exit_flag_hangs_up_the_channel() {
+        let sockets = vec![UdpSocket::bind("127.0.0.1:0").expect("a loopback port")];
+        let exit = Arc::new(AtomicBool::new(false));
+        let metrics = crate::metrics::Metrics::new(
+            &opentelemetry::global::meter("test"),
+            crate::config::FireVia::Rpc,
+        )
+        .queue;
+
+        let receivers = spawn(sockets, exit.clone(), metrics).expect("receivers start");
+        exit.store(true, Ordering::Relaxed);
+
+        // Generously past `RECV_TIMEOUT`, which is what bounds how long a
+        // receiver can sit in `recvmmsg` before it looks at the flag.
+        assert!(
+            matches!(
+                receivers.batches.recv_timeout(RECV_TIMEOUT * 5),
+                Err(mpsc::RecvTimeoutError::Disconnected)
+            ),
+            "a receiver outlived the exit flag"
+        );
+    }
 
     /// `recv_mmsg` asserts that every `Meta` handed to it is untouched, so a
     /// batch coming back from the parser has to be indistinguishable from a

@@ -154,6 +154,11 @@ services:
     environment:
       RUST_LOG: ${RUST_LOG:-shred_sniper=info}
       ENTRYPOINT: ${ENTRYPOINT:-172.28.0.11:8001}
+      # Unset here on purpose: the local cluster is torn down between runs, so
+      # a fresh gossip identity costs nothing. Against a real cluster set this
+      # to a mounted keypair, or every restart re-enters gossip from scratch and
+      # receives nothing until it has propagated.
+      NODE_KEYPAIR: ${NODE_KEYPAIR:-}
       ADVERTISE_IP: ${ADVERTISE_IP:-172.28.0.20}
       GOSSIP_PORT: ${GOSSIP_PORT:-8001}
       PORT_RANGE_MIN: ${PORT_RANGE_MIN:-8100}

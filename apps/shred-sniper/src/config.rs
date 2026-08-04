@@ -14,6 +14,7 @@ use {
 
 pub const ENV_LOG: &str = "RUST_LOG";
 pub const ENV_ENTRYPOINT: &str = "ENTRYPOINT";
+pub const ENV_NODE_KEYPAIR: &str = "NODE_KEYPAIR";
 pub const ENV_ADVERTISE_IP: &str = "ADVERTISE_IP";
 pub const ENV_GOSSIP_PORT: &str = "GOSSIP_PORT";
 pub const ENV_PORT_RANGE_MIN: &str = "PORT_RANGE_MIN";
@@ -87,7 +88,7 @@ const DEFAULT_METRICS_EXPORT_TIMEOUT_SECS: &str = "5";
 /// `SLOT_RETENTION` is expressed in slots because that is how the operator
 /// thinks about it, but buffers age out on the clock, so it is converted once
 /// here at the cluster's slot time.
-const SLOT_DURATION: Duration = Duration::from_millis(400);
+pub const SLOT_DURATION: Duration = Duration::from_millis(400);
 
 #[derive(Debug)]
 pub struct ConfigError {
@@ -137,6 +138,12 @@ impl FromStr for FireVia {
 #[derive(Debug)]
 pub struct Config {
     pub entrypoint: SocketAddr,
+    /// The node's gossip identity. Absent means a fresh one per run, which
+    /// costs a stretch of silence at every start: a new pubkey has to propagate
+    /// through gossip before any validator will place us in a turbine tree, and
+    /// until it has, nothing is sent to us at all. Keeping the identity on disk
+    /// is what makes a restart cheap.
+    pub node_keypair: Option<PathBuf>,
     pub advertise_ip: IpAddr,
     pub gossip_port: u16,
     pub port_range: (u16, u16),
@@ -194,6 +201,7 @@ impl Config {
 
         Ok(Self {
             entrypoint: parse(ENV_ENTRYPOINT, DEFAULT_ENTRYPOINT)?,
+            node_keypair: optional_parse(ENV_NODE_KEYPAIR)?,
             advertise_ip: parse(ENV_ADVERTISE_IP, DEFAULT_ADVERTISE_IP)?,
             gossip_port: parse(ENV_GOSSIP_PORT, DEFAULT_GOSSIP_PORT)?,
             port_range,

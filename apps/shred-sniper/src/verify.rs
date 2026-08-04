@@ -16,11 +16,21 @@
 //! on the batch index instead would have been faster and useless: a forgery
 //! need only claim a batch already seen.
 //!
-//! Two things are deliberately *not* refused. A slot the schedule cannot answer
-//! for, and a shred version that never parsed: the first because going blind
-//! whenever an RPC is a second late costs more than the forgery it would catch,
-//! the second because it is already gone. Both are counted, and the count is
-//! what says how much of the wire the check is really covering.
+//! A slot the schedule cannot answer for is the hole this check would otherwise
+//! have. Verifying a signature needs a leader to verify it against, so a slot
+//! outside the window cannot be judged on its signature at all — and the slot is
+//! a field the sender fills in. Left at that, a forgery need only name a distant
+//! slot to be waved through as unproven, and the whole check is decoration. So
+//! the window's edges are read as a claim of their own: past where the cluster
+//! can have got to, a slot is false rather than unknown. See
+//! [`Schedule::implausible`].
+//!
+//! What is still *not* refused is a slot that is plausible but unanswerable —
+//! no window fetched yet, or one gone stale behind a dead RPC — and a shred
+//! version that never parsed: the first because going blind whenever an RPC is
+//! a second late costs more than the forgery it would catch, the second because
+//! it is already gone. Both are counted, and the count is what says how much of
+//! the wire the check is really covering.
 
 use {
     crate::{aged::AgedMap, leaders::Schedule, metrics::Metrics, shred},
@@ -72,6 +82,15 @@ impl Verifier {
         self.verified.sweep(now, |_, ()| {});
 
         let Some(leader) = self.schedule.leader(slot) else {
+            // Unanswerable, so the signature cannot settle it — but a slot the
+            // cluster cannot have reached is settled without one. This is the
+            // only path on which a packet is refused without its bytes being
+            // looked at, and it is what stops a forgery choosing a slot to
+            // escape the check into.
+            if self.schedule.implausible(slot, now) {
+                self.metrics.packets.forged();
+                return Verdict::Forged;
+            }
             self.metrics.packets.unverified();
             return Verdict::Unknown;
         };
@@ -117,9 +136,13 @@ mod tests {
 
     /// A slot's shreds as its leader would emit them, with the key that signed.
     fn leader_slot() -> (Keypair, Vec<Vec<u8>>) {
+        leader_slot_at(SLOT)
+    }
+
+    fn leader_slot_at(slot: u64) -> (Keypair, Vec<Vec<u8>>) {
         let leader = Keypair::new();
         let payload: Vec<u8> = (0..40 * 1024u32).map(|byte| byte as u8).collect();
-        let shreds = Shredder::new(SLOT, SLOT - 1, 0, SHRED_VERSION)
+        let shreds = Shredder::new(slot, slot - 1, 0, SHRED_VERSION)
             .unwrap()
             .make_shreds_from_data_slice(
                 &leader,
@@ -194,12 +217,44 @@ mod tests {
         }
     }
 
-    /// A slot the schedule cannot answer for is unproven, not false. Refusing
-    /// it would blind the sniper every time an RPC is a moment late.
+    /// Naming a slot the schedule has nothing to say about, so that the
+    /// signature never gets a leader to be checked against. Answering it with
+    /// "unproven" would have made every check above optional: an attacker picks
+    /// the slot, so an attacker picks whether to be checked.
     #[test]
-    fn a_slot_without_a_leader_is_let_through() {
+    fn a_slot_the_cluster_cannot_have_reached_is_refused() {
+        let (leader, _) = leader_slot();
+        let (_, forged) = leader_slot_at(SLOT + 100_000);
+
+        let mut verifier = verifier(Schedule::fixed(SLOT, vec![leader.pubkey()]));
+        assert!(
+            matches!(
+                verifier.check(&forged[0], SHRED_VERSION, SLOT + 100_000),
+                Verdict::Forged
+            ),
+            "a shred escaped the leader check by claiming a distant slot"
+        );
+    }
+
+    /// The other side of that edge: a slot just past the window is somewhere
+    /// the cluster genuinely could be, so it is unproven rather than false.
+    #[test]
+    fn a_slot_just_past_the_window_is_unproven() {
         let (leader, shreds) = leader_slot();
-        let mut verifier = verifier(Schedule::fixed(SLOT + 1, vec![leader.pubkey()]));
+        let mut verifier = verifier(Schedule::fixed(SLOT, vec![leader.pubkey()]));
+        assert!(matches!(
+            verifier.check(&shreds[0], SHRED_VERSION, SLOT + 1),
+            Verdict::Unknown
+        ));
+    }
+
+    /// No window at all — startup, or an RPC that has never answered — says
+    /// nothing about any slot. Refusing on it would blind the sniper exactly
+    /// when it has least reason to be blind.
+    #[test]
+    fn no_schedule_at_all_refuses_nothing() {
+        let (_, shreds) = leader_slot();
+        let mut verifier = verifier(Schedule::default());
         assert!(matches!(
             verifier.check(&shreds[0], SHRED_VERSION, SLOT),
             Verdict::Unknown

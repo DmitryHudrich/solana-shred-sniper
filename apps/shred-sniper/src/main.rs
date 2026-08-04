@@ -77,9 +77,10 @@ fn run(config: Config) -> Result<(), Box<dyn Error>> {
     let (metrics, _metrics_guard) = metrics::init(&config);
     let shred_version = fetch_shred_version(&config.entrypoint)?;
 
-    let keypair = Arc::new(Keypair::new());
+    let keypair = Arc::new(node_identity(&config)?);
     info!(
         identity = %keypair.pubkey(),
+        persistent = config.node_keypair.is_some(),
         entrypoint = %config.entrypoint,
         shred_version,
         snipe_program = ?config.snipe_program,
@@ -91,6 +92,7 @@ fn run(config: Config) -> Result<(), Box<dyn Error>> {
     let cluster_info = build_cluster_info(&node, keypair, &config.entrypoint);
 
     let exit = Arc::new(AtomicBool::new(false));
+    install_signal_handlers(&exit)?;
     let gossip_service = GossipService::new(
         &cluster_info,
         None,
@@ -133,8 +135,48 @@ fn run(config: Config) -> Result<(), Box<dyn Error>> {
     }
 
     exit.store(true, Ordering::Relaxed);
+    info!("shutting down");
     let _ = gossip_service.join();
     Ok(())
+}
+
+/// Ctrl-C, and the signal a container runtime sends before it resorts to
+/// `SIGKILL`.
+///
+/// The handler does one thing: set the flag every thread in the process is
+/// already polling. The receivers see it within their read timeout and hang up,
+/// which closes the channel, which ends the parse loop, which returns from
+/// [`run`] and lets the exporter guards flush on the way out. Without it the
+/// default disposition kills the process outright and the last export interval
+/// — up to `METRICS_EXPORT_INTERVAL_SECS` of metrics, and whatever the log
+/// exporter had batched — goes with it.
+///
+/// The shutdown is registered first and fires only once the flag is already
+/// set, so a second signal still kills the process. An operator who has decided
+/// to stop should not have to reach for `SIGKILL` because a thread is wedged.
+fn install_signal_handlers(exit: &Arc<AtomicBool>) -> Result<(), Box<dyn Error>> {
+    for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+        signal_hook::flag::register_conditional_shutdown(signal, 1, exit.clone())
+            .map_err(|err| format!("failed to arm shutdown for signal {signal}: {err}"))?;
+        signal_hook::flag::register(signal, exit.clone())
+            .map_err(|err| format!("failed to install handler for signal {signal}: {err}"))?;
+    }
+    Ok(())
+}
+
+/// The key the node is known by in gossip. It signs nothing that spends money
+/// — that is the searcher keypair's job, and the two are deliberately separate
+/// — but it is the name validators build their turbine trees around, so
+/// changing it is not free. A fresh one per run means re-entering gossip from
+/// nothing at every restart, and receiving nothing until that has propagated.
+fn node_identity(config: &Config) -> Result<Keypair, Box<dyn Error>> {
+    match &config.node_keypair {
+        Some(path) => Ok(keys::keypair(path)?),
+        None => {
+            info!("no node keypair configured, using a fresh identity for this run");
+            Ok(Keypair::new())
+        }
+    }
 }
 
 /// A real shred version is never zero, so zero means the entrypoint has not
@@ -225,4 +267,35 @@ fn spawn_gossip_stats(
         })
         .map_err(|err| format!("failed to spawn gossip stats thread: {err}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Registering a handler and having one are different things, and the
+    /// difference is only visible from inside a signal. If this regresses the
+    /// process goes back to dying on the default disposition, which is not a
+    /// failure anything reports — it is simply the last export interval of
+    /// metrics quietly going missing on every restart.
+    ///
+    /// `SIGTERM` rather than `SIGINT` because a test runner may already be
+    /// doing something with the latter. Either way the flag is what is being
+    /// checked, and both are wired the same.
+    #[test]
+    fn a_signal_sets_the_exit_flag() {
+        let exit = Arc::new(AtomicBool::new(false));
+        install_signal_handlers(&exit).expect("handlers install");
+        assert!(!exit.load(Ordering::Relaxed), "the flag started out set");
+
+        // Safe to raise only because the conditional shutdown registered
+        // alongside the flag fires on an *already* set flag: the first signal
+        // sets it, and it is the second that would end the process.
+        signal_hook::low_level::raise(signal_hook::consts::SIGTERM).expect("raise");
+
+        assert!(
+            exit.load(Ordering::Relaxed),
+            "the process took a signal without anything noticing"
+        );
+    }
 }

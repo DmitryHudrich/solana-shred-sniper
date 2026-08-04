@@ -260,7 +260,8 @@ impl Metrics {
                 meter,
                 "sniper.bytes.buffered",
                 "By",
-                "Entry bytes held in the assembler",
+                "Resident bytes held by the assembler: slot arenas by capacity, plus the \
+                 per-shred and per-batch bookkeeping",
                 gauges.clone(),
                 |gauges| gauges.buffered_bytes.load(Ordering::Relaxed),
             ),
@@ -412,7 +413,9 @@ impl QueueMetrics {
                 .u64_counter("sniper.pool.exhausted")
                 .with_unit("{batch}")
                 .with_description(
-                    "Times a receiver had to allocate because the parser had not returned a batch",
+                    "Times a receiver stopped reading its socket to wait for the parser to \
+                     return a buffer. Datagrams that arrive during the wait are dropped by the \
+                     kernel and counted in sniper.node.udp_drops",
                 )
                 .build(),
             gauges,

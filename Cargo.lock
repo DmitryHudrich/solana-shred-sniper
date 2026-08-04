@@ -5077,6 +5077,7 @@ dependencies = [
  "rustc-hash",
  "serde",
  "serde_json",
+ "signal-hook",
  "solana-commitment-config",
  "solana-connection-cache",
  "solana-gossip",
