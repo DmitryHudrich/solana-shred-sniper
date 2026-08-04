@@ -171,6 +171,12 @@ struct Progress {
     /// Nothing more will come out of this batch: either every entry it declared
     /// was decoded, or its bytes turned out not to be entries at all.
     closed: bool,
+    /// Decoded in full before the shred that closes it arrived. The leader pads
+    /// a batch's last erasure set with empty shreds and the closing flag rides
+    /// the last of them, so what the wire still owes the batch is padding — but
+    /// the padding is still the batch's own ground, and until it is claimed the
+    /// batch ends short of where the next one begins.
+    padded: bool,
     /// How far the run reached when it was last walked. A run only ever grows
     /// forward, so the next walk resumes at the frontier instead of retracing
     /// the shreds behind it — without this a batch of `n` shreds costs `n`
@@ -209,6 +215,12 @@ struct Advance {
 /// way the leader laid them down — which is emphatically not the order they
 /// finish arriving in, and the order is the whole point when the question is
 /// which of two transactions came first.
+///
+/// A piece may carry no entries at all and still be worth sending: it moves
+/// `last_shred` over the padding at the batch's tail, out to the shred that
+/// closes it. Without that, a batch ends where its bytes ran out, the padding
+/// in front of the next batch reads as a hole, and every gap measured across
+/// it is reported as inexact.
 pub struct DecodedBatch {
     pub first_shred: u32,
     pub last_shred: u32,
@@ -380,7 +392,7 @@ impl SlotBuffer {
 
     fn decode_prefix(&self, start: u32, progress: &mut Progress) -> Option<Advance> {
         if progress.closed {
-            return None;
+            return self.claim_padding(start, progress);
         }
         let extent = self.extent(start, progress.extent)?;
         // Kept whether or not this pass reads anything, since what it is for is
@@ -434,6 +446,10 @@ impl SlotBuffer {
             Decoded::Waiting => None,
         };
         progress.closed = finished.is_some();
+        progress.padded = matches!(
+            finished,
+            Some(BatchOutcome::Decoded | BatchOutcome::Marker)
+        ) && !extent.complete;
 
         if entries.is_empty() && finished.is_none() {
             return None;
@@ -444,6 +460,35 @@ impl SlotBuffer {
             latency: extent.first_received.elapsed(),
             opened,
             finished,
+            recovered: extent.recovered,
+        })
+    }
+
+    /// Extends a decoded batch over the padding shreds still arriving behind
+    /// its entries, and reports the batch's full range once its closing shred
+    /// is in. The advance carries no entries — everything the batch declared is
+    /// already out — but where the batch *ends* is information in its own
+    /// right: a range that stops short of the next batch reads as shreds that
+    /// were never decoded, and the transactions they might have held.
+    fn claim_padding(&self, start: u32, progress: &mut Progress) -> Option<Advance> {
+        if !progress.padded {
+            return None;
+        }
+        // Already claimed; a walk from here could only report it again.
+        if matches!(&progress.extent, Some(extent) if extent.complete) {
+            return None;
+        }
+        let extent = self.extent(start, progress.extent)?;
+        progress.extent = Some(extent);
+        if !extent.complete {
+            return None;
+        }
+        Some(Advance {
+            last_shred: extent.last,
+            entries: Vec::new(),
+            latency: extent.first_received.elapsed(),
+            opened: false,
+            finished: None,
             recovered: extent.recovered,
         })
     }
@@ -635,6 +680,16 @@ impl Assembler {
             }
             if !advance.entries.is_empty() {
                 self.metrics.entries(advance.entries.len() as u64);
+            }
+            // An advance with no entries in it still moves a boundary — the
+            // padding claimed behind a decoded batch, or a marker that declared
+            // nothing — and the boundary is what says the ground between two
+            // batches is accounted for. The one advance not worth reporting is
+            // a failed batch's: its range is precisely what cannot be vouched
+            // for.
+            if !advance.entries.is_empty()
+                || !matches!(advance.finished, Some(BatchOutcome::Failed))
+            {
                 batches.push(DecodedBatch {
                     first_shred: start,
                     last_shred: advance.last_shred,
@@ -1336,6 +1391,46 @@ mod tests {
             first_expected + second_expected,
             "every transaction of both batches has to come out exactly once"
         );
+    }
+
+    /// The leader pads a batch's last erasure set with empty shreds and puts
+    /// the closing flag on the last of them, so every entry is out before the
+    /// terminator arrives. The padding is still the batch's own ground: unless
+    /// it is claimed, the batch ends short of where the next one begins and
+    /// the gap between them reads as shreds that were never decoded.
+    #[test]
+    fn padding_behind_a_decoded_batch_is_claimed() {
+        let (payload, expected) = batch(2, 2);
+        let mut assembler = assembler();
+
+        // The batch's bytes end at shred 0; shreds 1..=3 are the padding of
+        // its erasure set, and the terminator rides the last of them.
+        let decoded = assembler.insert(&shred(SLOT, 0, &payload, false), false);
+        assert_eq!(count(&decoded), expected, "every entry is out already");
+
+        assert!(
+            assembler.insert(&shred(SLOT, 1, &[], false), false).is_empty(),
+            "padding short of the terminator has nothing to report"
+        );
+        assert!(assembler.insert(&shred(SLOT, 2, &[], false), false).is_empty());
+
+        let claimed = assembler.insert(&shred(SLOT, 3, &[], true), false);
+        let ranges: Vec<(u32, u32, usize)> = claimed
+            .iter()
+            .map(|batch| (batch.first_shred, batch.last_shred, batch.entries.len()))
+            .collect();
+        assert_eq!(
+            ranges,
+            vec![(0, 3, 0)],
+            "the terminator hands the batch the padding in front of it"
+        );
+
+        // The next batch begins right behind the claimed ground, so the two
+        // ranges now tile with no hole between them.
+        let (second, second_expected) = batch(1, 1);
+        let released = assembler.insert(&shred(SLOT, 4, &second, true), false);
+        assert_eq!(count(&released), second_expected);
+        assert_eq!(released[0].first_shred, 4);
     }
 
     /// The point of the whole assembler: a batch is read as it arrives, so the
