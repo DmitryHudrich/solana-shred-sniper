@@ -496,7 +496,7 @@
       "id": 11,
       "type": "timeseries",
       "title": "Entry availability latency",
-      "description": "Time from a batch's first shred landing on our socket to its transactions being decoded. This is the head start over RPC.",
+      "description": "Time from a batch's first shred landing on our socket to its transactions being decoded. A batch is decoded as it arrives, so its first entries are readable well before its last shred lands: the gap between the two lines is what reading it early is worth. Both are exact means rather than quantiles, which a histogram can only interpolate inside a bucket.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -514,8 +514,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_batch_latency_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p50"
+          "expr": "sum(rate(sniper_batch_first_entry_seconds_sum{job=\"$job\"}[$__rate_interval])) / sum(rate(sniper_batch_first_entry_seconds_count{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "first entries"
         },
         {
           "refId": "B",
@@ -523,17 +523,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(sniper_batch_latency_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p95"
-        },
-        {
-          "refId": "C",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(sniper_batch_latency_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p99"
+          "expr": "sum(rate(sniper_batch_latency_seconds_sum{job=\"$job\"}[$__rate_interval])) / sum(rate(sniper_batch_latency_seconds_count{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "whole batch"
         }
       ],
       "fieldConfig": {
@@ -548,7 +539,30 @@
             "axisSoftMin": 0
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "whole batch.*"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -743,8 +757,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_duration_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p50"
+          "expr": "sum(rate(sniper_slot_duration_seconds_sum{job=\"$job\"}[$__rate_interval])) / sum(rate(sniper_slot_duration_seconds_count{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "mean"
         },
         {
           "refId": "B",
@@ -1109,8 +1123,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_completeness_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p50"
+          "expr": "sum(rate(sniper_slot_completeness_sum{job=\"$job\"}[$__rate_interval])) / sum(rate(sniper_slot_completeness_count{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "mean"
         }
       ],
       "fieldConfig": {
@@ -1303,8 +1317,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_snipe_latency_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p50"
+          "expr": "sum(rate(sniper_snipe_latency_seconds_sum{job=\"$job\"}[$__rate_interval])) / sum(rate(sniper_snipe_latency_seconds_count{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "mean"
         },
         {
           "refId": "B",
@@ -1422,7 +1436,7 @@
       "id": 25,
       "type": "timeseries",
       "title": "Delivery skew vs leader clock",
-      "description": "Arrival offset within the slot minus the offset the leader stamped into the shred's reference tick. The two clocks share no origin, so the absolute value means nothing \u2014 the spread is turbine delivery jitter, and widening is what to watch.",
+      "description": "Arrival offset within the slot minus the offset the leader stamped into the shred's reference tick. The two clocks share no origin, so the absolute value means nothing — the spread is turbine delivery jitter, and widening is what to watch.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1440,8 +1454,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_delivery_skew_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p50"
+          "expr": "sum(rate(sniper_delivery_skew_seconds_sum{job=\"$job\"}[$__rate_interval])) / sum(rate(sniper_delivery_skew_seconds_count{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "mean"
         },
         {
           "refId": "B",
@@ -1640,8 +1654,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_recv_batch_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p50"
+          "expr": "sum(rate(sniper_recv_batch_sum{job=\"$job\"}[$__rate_interval])) / sum(rate(sniper_recv_batch_count{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "mean"
         },
         {
           "refId": "B",
@@ -1903,7 +1917,7 @@
       "id": 31,
       "type": "table",
       "title": "Bot vs wallet, by slot",
-      "description": "One row per slot where either side traded. tx_gap is how many transactions separate the bot from the wallet inside the block. Reacting to a transaction can only land behind it, so a bot that snipes this wallet has a positive gap and small is good; a negative one means the bot fired on its own rather than in response. same_entry means the two share an entry, and transactions of one entry execute in parallel \u2014 the gap is still real but it does not order them. exact is false when a batch we never decoded sits between the two, which makes the count short by whatever it held. Until the bot exists, every row carries the wallet's signature alone, which is the baseline it will be judged against.",
+      "description": "One row per slot where either side traded. tx_gap is how many transactions separate the bot from the wallet inside the block. Reacting to a transaction can only land behind it, so a bot that snipes this wallet has a positive gap and small is good; a negative one means the bot fired on its own rather than in response. same_entry means the two share an entry, and transactions of one entry execute in parallel — the gap is still real but it does not order them. exact is false when a batch we never decoded sits between the two, which makes the count short by whatever it held. Until the bot exists, every row carries the wallet's signature alone, which is the baseline it will be judged against.",
       "datasource": {
         "type": "loki",
         "uid": "loki"
@@ -2110,7 +2124,7 @@
       "id": 32,
       "type": "stat",
       "title": "Watched wallet",
-      "description": "Transactions per second paid for by a wallet in TARGET_WALLETS. Zero means either the wallet is idle or the address is wrong \u2014 nothing else on this row can be read until this one moves.",
+      "description": "Transactions per second paid for by a wallet in TARGET_WALLETS. Zero means either the wallet is idle or the address is wrong — nothing else on this row can be read until this one moves.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -2169,7 +2183,7 @@
       "id": 33,
       "type": "stat",
       "title": "Slot left, typical",
-      "description": "What is left of the slot by the time the wallet's transaction is decoded here. This is the entire budget for reacting to it and landing in the same block: everything a sniper would have to do \u2014 decide, sign, send, and reach the leader \u2014 has to fit inside this number. The slot's length is the measured one rather than mainnet's 400 ms, so the reading stays honest on a cluster that runs slower.",
+      "description": "What is left of the slot by the time the wallet's transaction is decoded here. This is the entire budget for reacting to it and landing in the same block: everything a sniper would have to do — decide, sign, send, and reach the leader — has to fit inside this number. The slot's length is the measured one rather than mainnet's 400 ms, so the reading stays honest on a cluster that runs slower.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -2187,8 +2201,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_duration_seconds_bucket{job=\"$job\"}[$__rate_interval]))) - histogram_quantile(0.5, sum by (le) (rate(sniper_watched_offset_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p50"
+          "expr": "sum(rate(sniper_slot_duration_seconds_sum{job=\"$job\"}[$__rate_interval])) / sum(rate(sniper_slot_duration_seconds_count{job=\"$job\"}[$__rate_interval])) - sum(rate(sniper_watched_offset_seconds_sum{job=\"$job\"}[$__rate_interval])) / sum(rate(sniper_watched_offset_seconds_count{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "mean"
         }
       ],
       "fieldConfig": {
@@ -2253,7 +2267,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_duration_seconds_bucket{job=\"$job\"}[$__rate_interval]))) - histogram_quantile(0.95, sum by (le) (rate(sniper_watched_offset_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+          "expr": "sum(rate(sniper_slot_duration_seconds_sum{job=\"$job\"}[$__rate_interval])) / sum(rate(sniper_slot_duration_seconds_count{job=\"$job\"}[$__rate_interval])) - histogram_quantile(0.95, sum by (le) (rate(sniper_watched_offset_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
           "legendFormat": "p05"
         }
       ],
@@ -2319,8 +2333,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_watched_offset_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p50"
+          "expr": "sum(rate(sniper_watched_offset_seconds_sum{job=\"$job\"}[$__rate_interval])) / sum(rate(sniper_watched_offset_seconds_count{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "mean"
         },
         {
           "refId": "B",
@@ -2346,7 +2360,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_duration_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+          "expr": "sum(rate(sniper_slot_duration_seconds_sum{job=\"$job\"}[$__rate_interval])) / sum(rate(sniper_slot_duration_seconds_count{job=\"$job\"}[$__rate_interval]))",
           "legendFormat": "slot length"
         }
       ],
@@ -2476,7 +2490,7 @@
       "id": 41,
       "type": "stat",
       "title": "Answers that landed",
-      "description": "Share of sent transactions the sniper later saw come back in a block. Nothing is asked of the RPC to work this out \u2014 our own transaction reaches us over turbine like everybody else's, so being included is something the sniper observes rather than something it is told.",
+      "description": "Share of sent transactions the sniper later saw come back in a block. Nothing is asked of the RPC to work this out — our own transaction reaches us over turbine like everybody else's, so being included is something the sniper observes rather than something it is told.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -2560,8 +2574,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_fire_reaction_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": ""
+          "expr": "sum(rate(sniper_fire_reaction_seconds_sum{job=\"$job\"}[$__rate_interval])) / sum(rate(sniper_fire_reaction_seconds_count{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "mean"
         }
       ],
       "fieldConfig": {
@@ -2674,7 +2688,7 @@
       "id": 44,
       "type": "stat",
       "title": "Answered in the same slot",
-      "description": "Share of answers included in the very slot the trigger was seen in \u2014 the sniper reacting inside the leader's own block rather than in the next one. Anything less than that is still a landed transaction, just not a contended one.",
+      "description": "Share of answers included in the very slot the trigger was seen in — the sniper reacting inside the leader's own block rather than in the next one. Anything less than that is still a landed transaction, just not a contended one.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -2806,7 +2820,7 @@
       "id": 46,
       "type": "timeseries",
       "title": "Reaction time",
-      "description": "The reaction split into its two parts. The send is the RPC round trip, which belongs to the network; the distance between it and the total is everything the sniper does itself \u2014 build the memo, sign it, hand it over. When the two lines sit on top of one another there is nothing left to optimise on this side.",
+      "description": "The reaction split into its two parts. The send is the RPC round trip, which belongs to the network; the distance between it and the total is everything the sniper does itself — build the memo, sign it, hand it over. When the two lines sit on top of one another there is nothing left to optimise on this side.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -2824,8 +2838,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_fire_reaction_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "reaction p50"
+          "expr": "sum(rate(sniper_fire_reaction_seconds_sum{job=\"$job\"}[$__rate_interval])) / sum(rate(sniper_fire_reaction_seconds_count{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "reaction mean"
         },
         {
           "refId": "B",
@@ -2851,8 +2865,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_fire_send_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "send p50"
+          "expr": "sum(rate(sniper_fire_send_seconds_sum{job=\"$job\"}[$__rate_interval])) / sum(rate(sniper_fire_send_seconds_count{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "send mean"
         }
       ],
       "fieldConfig": {
@@ -2984,7 +2998,7 @@
       "id": 48,
       "type": "timeseries",
       "title": "Answer round trip",
-      "description": "From our transaction being sent to seeing it in a block, measured on the shreds coming back. This is the leader's side of the loop rather than ours, and it is what sets how long a sniper has to wait before it knows whether it won. Split by the path the answer left on: the two differ by an RPC hop on the way out, so any gap between them here is that hop showing up in the only number that decides anything.",
+      "description": "From our transaction being sent to seeing it in a block, measured on the shreds coming back. This is the leader's side of the loop rather than ours, and it is what sets how long a sniper has to wait before it knows whether it won. Split by the path the answer left on: the two differ by an RPC hop on the way out, so any gap between them here is that hop showing up in the only number that decides anything. Shown as the exact mean — a quantile off a histogram is interpolated inside whichever bucket it falls in, which reports the middle of a bucket rather than the measurement. The tail this hides is in \"Where the answer landed\": a round trip far above the rest is an answer that missed the leader's block, and that panel counts those exactly.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -3002,26 +3016,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le, via) (rate(sniper_fire_round_trip_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "{{via}} p50"
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "histogram_quantile(0.95, sum by (le, via) (rate(sniper_fire_round_trip_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "{{via}} p95"
-        },
-        {
-          "refId": "C",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_duration_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "slot length"
+          "expr": "sum by (via) (rate(sniper_fire_round_trip_seconds_sum{job=\"$job\"}[$__rate_interval])) / sum by (via) (rate(sniper_fire_round_trip_seconds_count{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "{{via}} mean"
         }
       ],
       "fieldConfig": {
@@ -3036,37 +3032,7 @@
             "axisSoftMin": 0
           }
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "slot length"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "text"
-                }
-              },
-              {
-                "id": "custom.lineStyle",
-                "value": {
-                  "fill": "dash",
-                  "dash": [
-                    10,
-                    10
-                  ]
-                }
-              },
-              {
-                "id": "custom.lineWidth",
-                "value": 1
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "options": {
         "legend": {
@@ -3088,7 +3054,7 @@
       "id": 49,
       "type": "timeseries",
       "title": "Where the answer landed",
-      "description": "Slots between the one the trigger was seen in and the one the answer was included in. Zero is the sniper landing in the leader's own block \u2014 the only outcome that would have contended with the wallet it was racing.",
+      "description": "Slots between the one the trigger was seen in and the one the answer was included in. Zero is the sniper landing in the leader's own block — the only outcome that would have contended with the wallet it was racing.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -3106,8 +3072,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le, via) (rate(sniper_fire_slots_behind_bucket{job=\"$job\"}[$__rate_interval])))",
-          "legendFormat": "{{via}} p50"
+          "expr": "sum by (via) (rate(sniper_fire_slots_behind_sum{job=\"$job\"}[$__rate_interval])) / sum by (via) (rate(sniper_fire_slots_behind_count{job=\"$job\"}[$__rate_interval]))",
+          "legendFormat": "{{via}} mean"
         },
         {
           "refId": "B",
@@ -3171,7 +3137,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sniper_slot_duration_seconds_bucket{job=\"$job\"}[$__rate_interval]))) - histogram_quantile(0.95, sum by (le) (rate(sniper_watched_offset_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
+          "expr": "sum(rate(sniper_slot_duration_seconds_sum{job=\"$job\"}[$__rate_interval])) / sum(rate(sniper_slot_duration_seconds_count{job=\"$job\"}[$__rate_interval])) - histogram_quantile(0.95, sum by (le) (rate(sniper_watched_offset_seconds_bucket{job=\"$job\"}[$__rate_interval])))",
           "legendFormat": "budget left in slot"
         },
         {

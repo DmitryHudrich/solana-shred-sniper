@@ -75,6 +75,25 @@ const REACTION_BUCKETS: &[f64] = &[
 /// same slot, which on a real cluster only happens if the leader was still
 /// building it when we sent.
 const SLOTS_BEHIND_BUCKETS: &[f64] = &[0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 16.0, 32.0];
+/// How long a slot took by our own clock. A cluster's slot time is close to a
+/// constant, so the buckets have to be tight around the two that matter —
+/// mainnet's 400 ms and the slower ones a test cluster is configured with —
+/// or every reading piles into one wide bucket and the quantiles report its
+/// middle. Everything above is a leader that was skipped, which only has to be
+/// distinguishable, not precise.
+const SLOT_DURATION_BUCKETS: &[f64] = &[
+    0.3, 0.35, 0.4, 0.45, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 2.0, 3.0, 5.0,
+];
+/// Sent to seen in a block. Most of this is the leader coalescing entries before
+/// it broadcasts, which is tens of milliseconds — and the generic second buckets
+/// jump straight from 20 ms to 50 ms to 100 ms, so every reading in that range
+/// falls in one bucket and the quantiles report the middle of it rather than the
+/// measurement. The rungs are close together from a few milliseconds to a tenth
+/// of a second because that is where the answer lives on any cluster; above it
+/// they only have to separate "missed the leader's block" from "much worse".
+const ROUND_TRIP_BUCKETS: &[f64] = &[
+    0.002, 0.005, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.1, 0.15, 0.2, 0.4, 0.8,
+];
 
 #[derive(Clone, Copy)]
 pub enum PacketKind {
@@ -384,6 +403,7 @@ pub struct AssemblerMetrics {
     shreds_missing: Counter<u64>,
     batches: Counter<u64>,
     batch_latency: Histogram<f64>,
+    batch_first_entry: Histogram<f64>,
     entries: Counter<u64>,
     slots_unterminated: Counter<u64>,
     slot_completeness: Histogram<f64>,
@@ -415,6 +435,20 @@ impl AssemblerMetrics {
                 .with_unit("s")
                 .with_description("Time from a batch's first shred to its decoded transactions")
                 .with_boundaries(SECOND_BUCKETS.to_vec())
+                .build(),
+            batch_first_entry: meter
+                .f64_histogram("sniper.batch.first_entry")
+                .with_unit("s")
+                // A batch is decoded as it arrives, so its first entries are
+                // readable well before its last shred lands. This is what the
+                // sniper actually reacts on; the distance to `batch.latency` is
+                // what reading it early is worth.
+                .with_description("Time from a batch's first shred to the first entries out of it")
+                // The whole point of the measurement is that it is small, and
+                // the second-scale boundaries put everything below a
+                // millisecond in one bucket — which is where this now lives
+                // whenever the batch opens on the shred that began it.
+                .with_boundaries(REACTION_BUCKETS.to_vec())
                 .build(),
             entries: meter
                 .u64_counter("sniper.entries")
@@ -468,6 +502,15 @@ impl AssemblerMetrics {
         };
         self.batches.add(1, attrs);
         self.batch_latency.record(
+            latency.as_secs_f64(),
+            &self.recovery_attrs[usize::from(recovered)],
+        );
+    }
+
+    /// The first entries of a batch reaching the pipeline, which is the moment
+    /// the sniper could first have reacted to anything in it.
+    pub fn opened(&self, latency: Duration, recovered: bool) {
+        self.batch_first_entry.record(
             latency.as_secs_f64(),
             &self.recovery_attrs[usize::from(recovered)],
         );
@@ -642,7 +685,7 @@ impl SlotMetrics {
                 .f64_histogram("sniper.slot.duration")
                 .with_unit("s")
                 .with_description("Wall time between the first shred of consecutive slots")
-                .with_boundaries(SECOND_BUCKETS.to_vec())
+                .with_boundaries(SLOT_DURATION_BUCKETS.to_vec())
                 .build(),
             slot_shreds: meter
                 .u64_histogram("sniper.slot.shreds")
@@ -778,7 +821,7 @@ impl FireMetrics {
                 .f64_histogram("sniper.fire.round_trip")
                 .with_unit("s")
                 .with_description("From our transaction being sent to seeing it in a block")
-                .with_boundaries(SECOND_BUCKETS.to_vec())
+                .with_boundaries(ROUND_TRIP_BUCKETS.to_vec())
                 .build(),
             fire_slots_behind: meter
                 .u64_histogram("sniper.fire.slots_behind")

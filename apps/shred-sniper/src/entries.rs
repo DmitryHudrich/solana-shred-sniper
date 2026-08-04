@@ -1,3 +1,18 @@
+//! Turning shreds back into transactions.
+//!
+//! A leader serializes a slot's entries into one `Vec<Entry>` per batch and
+//! cuts that byte string into shreds, so a batch is only whole once a
+//! data-complete shred closes a run of consecutive indices. Waiting for that is
+//! the obvious way to decode it and the wrong one for a sniper: the entries at
+//! the front of a batch are readable long before the shreds at its back arrive,
+//! and the transaction worth reacting to is usually one of them — the leader
+//! writes what it executed first, first.
+//!
+//! So a batch is decoded as it arrives. Every shred that extends the run of
+//! bytes from the batch's first index hands over whatever entries have become
+//! whole, and the decoder remembers how far into the batch it got. A batch
+//! comes out in as many pieces as it takes; nothing is decoded twice.
+
 use {
     crate::{
         aged::AgedMap,
@@ -7,7 +22,8 @@ use {
     solana_hash::Hash,
     solana_transaction::versioned::VersionedTransaction,
     std::{
-        collections::{BTreeMap, BTreeSet, HashSet},
+        collections::{BTreeMap, BTreeSet},
+        io::Cursor,
         sync::Arc,
         time::{Duration, Instant},
     },
@@ -23,6 +39,11 @@ const MAX_BUFFERED_SLOTS: usize = 128;
 /// live. The floor keeps a slot that has seen a shred or two from compacting on
 /// every duplicate, where copying costs more than the bytes it reclaims.
 const COMPACT_FLOOR: usize = 64 * 1024;
+
+/// A batch opens with the number of entries in it, as bincode writes the length
+/// of any sequence: eight little-endian bytes. Nothing else about the batch can
+/// be read until they have arrived.
+const ENTRY_COUNT: usize = 8;
 
 #[derive(Debug, Deserialize)]
 pub struct Entry {
@@ -44,27 +65,72 @@ struct StoredShred {
     recovered: bool,
 }
 
-/// A completed batch's bytes. Shreds are appended to the arena as they arrive
-/// and a batch is a run of consecutive indices, so one delivered in order is
-/// already contiguous there and can be decoded where it lies. Only a batch
+/// The bytes of a batch that have arrived. Shreds are appended to the arena as
+/// they arrive and a batch is a run of consecutive indices, so one delivered in
+/// order is already contiguous there and can be read where it lies. Only a run
 /// interleaved with something else has to be stitched into a buffer of its own.
 enum Payload {
     Arena { at: usize, len: usize },
     Stitched(Vec<u8>),
 }
 
-/// A completed batch, before it is decoded.
-struct Complete {
-    payload: Payload,
+/// How far the run of shreds beginning at a batch's first index reaches, and
+/// where its bytes sit. Everything up to the first gap is readable, whether or
+/// not the shred that closes the batch has turned up.
+struct Extent {
+    /// Highest index in the run.
+    last: u32,
+    /// The run ends at a shred that closes the batch, so there is no more of it
+    /// to come.
+    complete: bool,
     first_received: Instant,
     recovered: bool,
-    first_shred: u32,
-    last_shred: u32,
+    /// Bytes the run holds, counted from the batch's first byte.
+    len: usize,
 }
 
-/// A batch's entries together with the shreds they came from.
+/// How far a batch has been decoded. Entries are handed over as the shreds
+/// carrying them arrive, so what has to survive between shreds is the point in
+/// the batch's bytes the decoder reached and how many entries it is still owed.
+#[derive(Default)]
+struct Progress {
+    /// Bytes already turned into entries.
+    consumed: usize,
+    /// Entries still to come. `None` until the count the batch opens with has
+    /// arrived.
+    remaining: Option<u64>,
+    /// Set once entries have been handed over, so the wait for the first of
+    /// them is recorded once and a batch that has already yielded something is
+    /// never mistaken for an empty one.
+    opened: bool,
+    /// Nothing more will come out of this batch: either every entry it declared
+    /// was decoded, or its bytes turned out not to be entries at all.
+    closed: bool,
+}
+
+/// What one shred did for the batch it belongs to.
+struct Advance {
+    /// Highest shred index whose bytes are accounted for by the entries handed
+    /// over so far.
+    last_shred: u32,
+    entries: Vec<Entry>,
+    /// Time since the batch's first shred, for whichever of the two below is
+    /// set.
+    latency: Duration,
+    /// Set on the pass that produced the batch's first entries.
+    opened: bool,
+    /// Set on the pass that finished the batch, with what became of it.
+    finished: Option<BatchOutcome>,
+    recovered: bool,
+}
+
+/// Some of a batch's entries, together with the shreds they came from.
 ///
-/// The range is what places the batch inside its slot. Batches are runs of
+/// A batch surfaces in as many pieces as the shreds carrying it allow, so this
+/// is a piece of one rather than all of it — `first_shred` is what ties the
+/// pieces together.
+///
+/// The range is what places the entries inside their slot. Batches are runs of
 /// consecutive shred indices, so sorting by where a batch begins sorts them the
 /// way the leader laid them down — which is emphatically not the order they
 /// finish arriving in, and the order is the whole point when the question is
@@ -90,7 +156,9 @@ struct SlotBuffer {
     /// checks only ever touch the batches an insert could have changed,
     /// rather than rescanning the whole slot on every shred.
     starts: BTreeSet<u32>,
-    emitted: HashSet<u32>,
+    /// Decoding state of every batch begun in this slot, by the index it begins
+    /// at. Held between shreds, which is what lets a batch be read in pieces.
+    progress: BTreeMap<u32, Progress>,
     /// Index of the shred that closes the slot, once one has arrived. It is the
     /// only thing that tells us how many shreds the slot was supposed to have.
     last_index: Option<u32>,
@@ -103,7 +171,7 @@ impl SlotBuffer {
             stale: 0,
             shreds: BTreeMap::new(),
             starts: BTreeSet::from([0]),
-            emitted: HashSet::new(),
+            progress: BTreeMap::new(),
             last_index: None,
         }
     }
@@ -170,53 +238,97 @@ impl SlotBuffer {
         self.stale = 0;
     }
 
-    /// Batches the shred at `index` could have completed: the one holding it
-    /// and, when the shred closes a batch, the one beginning right after it —
+    /// Batches the shred at `index` could have carried forward: the one holding
+    /// it and, when the shred closes a batch, the one beginning right after it —
     /// a boundary this insert may have just created in front of shreds already
     /// held. No other batch changes on one insert.
-    fn complete_batches(&mut self, index: u32) -> Vec<Complete> {
-        let containing = *self
-            .starts
-            .range(..=index)
-            .next_back()
-            .expect("zero is always a start");
+    ///
+    /// A start that is not in `starts` yet is one whose preceding terminator has
+    /// not arrived, and the shred is attributed to the nearest start below it
+    /// instead. That is harmless: the run from that earlier start cannot reach
+    /// past the terminator it is missing, so it never reads bytes that belong to
+    /// a batch it is not.
+    fn candidates(&self, index: u32) -> [Option<u32>; 2] {
+        let containing = self.starts.range(..=index).next_back().copied();
         let following = self.starts.get(&(index + 1)).copied();
-
-        let mut batches = Vec::new();
-        for start in [Some(containing), following].into_iter().flatten() {
-            if self.emitted.contains(&start) {
-                continue;
-            }
-            if let Some(complete) = self.scan_batch(start) {
-                self.emitted.insert(start);
-                batches.push(complete);
-            }
-        }
-        batches
+        [containing, following]
     }
 
-    /// Walks the run of consecutive shreds beginning at `start`. The batch is
-    /// only whole once a data-complete shred closes it with no gap on the way.
-    fn scan_batch(&self, start: u32) -> Option<Complete> {
+    /// Decodes as much of the batch beginning at `start` as the shreds now held
+    /// allow, and reports what that yielded.
+    fn advance(&mut self, start: u32) -> Option<Advance> {
+        let mut progress = self.progress.remove(&start).unwrap_or_default();
+        let advance = self.decode_prefix(start, &mut progress);
+        // A closed batch keeps its progress so that a duplicate of one of its
+        // shreds cannot start it over.
+        self.progress.insert(start, progress);
+        advance
+    }
+
+    fn decode_prefix(&self, start: u32, progress: &mut Progress) -> Option<Advance> {
+        if progress.closed {
+            return None;
+        }
+        let extent = self.extent(start)?;
+        // Nothing new to read, and no terminator to force a verdict on what has
+        // been read so far.
+        if extent.len <= progress.consumed && !extent.complete {
+            return None;
+        }
+
+        let mut entries = Vec::new();
+        let (payload, base) = self.payload(start, &extent, progress.consumed);
+        let bytes = match &payload {
+            Payload::Arena { at, len } => &self.arena[*at..*at + *len],
+            Payload::Stitched(stitched) => stitched.as_slice(),
+        };
+        let decoded = decode(bytes, base, progress, &mut entries);
+
+        let opened = !progress.opened && !entries.is_empty();
+        // A batch that has already handed something over is not an empty one,
+        // however little the pass that finished it produced.
+        let any = progress.opened || !entries.is_empty();
+        progress.opened |= !entries.is_empty();
+
+        let finished = match decoded {
+            // Every entry the batch declared is out. The shreds that may still
+            // be owed hold nothing but the padding to the end of the erasure
+            // batch, so there is no reason to wait for them.
+            Decoded::Done if any => Some(BatchOutcome::Decoded),
+            Decoded::Done => Some(BatchOutcome::Marker),
+            Decoded::Invalid => Some(BatchOutcome::Failed),
+            // The batch is closed and still owes entries, so its bytes were
+            // never a whole `Vec<Entry>` to begin with.
+            Decoded::Waiting if extent.complete => Some(BatchOutcome::Failed),
+            Decoded::Waiting => None,
+        };
+        progress.closed = finished.is_some();
+
+        if entries.is_empty() && finished.is_none() {
+            return None;
+        }
+        Some(Advance {
+            last_shred: extent.last,
+            entries,
+            latency: extent.first_received.elapsed(),
+            opened,
+            finished,
+            recovered: extent.recovered,
+        })
+    }
+
+    /// Walks the run of consecutive shreds beginning at `start`, which is as
+    /// much of the batch as has arrived. A gap ends the walk, and so does the
+    /// data-complete shred that closes the batch.
+    fn extent(&self, start: u32) -> Option<Extent> {
         let mut index = start;
         let mut first_received: Option<Instant> = None;
         let mut recovered = false;
-        // Where the batch begins in the arena, how long it is, and whether its
-        // shreds turned out to be one unbroken run there.
-        let mut at = 0;
+        let mut complete = false;
         let mut len = 0;
-        let mut next = None;
-        let mut contiguous = true;
 
-        loop {
-            let shred = self.shreds.get(&index)?;
-            match next {
-                None => at = shred.at,
-                Some(expected) => contiguous &= shred.at == expected,
-            }
-            next = Some(shred.at + shred.len as usize);
+        while let Some(shred) = self.shreds.get(&index) {
             len += shred.len as usize;
-
             first_received = Some(match first_received {
                 Some(earliest) if earliest <= shred.received => earliest,
                 _ => shred.received,
@@ -224,27 +336,67 @@ impl SlotBuffer {
             recovered |= shred.recovered;
             index += 1;
             if shred.data_complete {
+                complete = true;
                 break;
             }
         }
 
-        let payload = if contiguous {
-            Payload::Arena { at, len }
-        } else {
-            let mut stitched = Vec::with_capacity(len);
-            for member in start..index {
-                stitched.extend_from_slice(self.bytes(&self.shreds[&member]));
-            }
-            Payload::Stitched(stitched)
-        };
-        Some(Complete {
-            payload,
-            first_received: first_received.expect("the loop ran at least once"),
+        Some(Extent {
+            // The loop leaves `index` one past the last shred it took.
+            last: index.checked_sub(1).filter(|last| *last >= start)?,
+            complete,
+            first_received: first_received?,
             recovered,
-            first_shred: start,
-            // The loop leaves `index` one past the shred that closed the batch.
-            last_shred: index - 1,
+            len,
         })
+    }
+
+    /// The run's bytes from `consumed` on, and where in the batch they begin.
+    ///
+    /// Shreds already turned into entries are left out, which is what keeps a
+    /// run that arrived out of order from being stitched together again from
+    /// scratch on every shred: what has to be copied is the undecoded tail, not
+    /// the whole batch. A run laid end to end in the arena — which is what
+    /// in-order delivery produces — is read where it lies and copied not at all.
+    fn payload(&self, start: u32, extent: &Extent, consumed: usize) -> (Payload, usize) {
+        let mut base = 0;
+        let mut from = start;
+        while from <= extent.last {
+            let len = self.shreds[&from].len as usize;
+            if base + len > consumed {
+                break;
+            }
+            base += len;
+            from += 1;
+        }
+        // Every byte held has been read already. There is nothing to hand the
+        // decoder, but it is still owed the chance to say the batch is short.
+        if from > extent.last {
+            return (Payload::Arena { at: 0, len: 0 }, base);
+        }
+
+        let mut at = 0;
+        let mut len = 0;
+        let mut next = None;
+        let mut contiguous = true;
+        for member in from..=extent.last {
+            let shred = &self.shreds[&member];
+            match next {
+                None => at = shred.at,
+                Some(expected) => contiguous &= shred.at == expected,
+            }
+            next = Some(shred.at + shred.len as usize);
+            len += shred.len as usize;
+        }
+
+        if contiguous {
+            return (Payload::Arena { at, len }, base);
+        }
+        let mut stitched = Vec::with_capacity(len);
+        for member in from..=extent.last {
+            stitched.extend_from_slice(self.bytes(&self.shreds[&member]));
+        }
+        (Payload::Stitched(stitched), base)
     }
 
     /// Gaps below the highest shred held, and — once the slot's closing shred
@@ -294,33 +446,25 @@ impl Assembler {
             self.metrics.duplicate();
         }
 
-        let completed = buffer.complete_batches(shred.index);
         let mut batches = Vec::new();
-        for complete in completed {
-            let latency = complete.first_received.elapsed();
-            let bytes = match &complete.payload {
-                Payload::Arena { at, len } => &buffer.arena[*at..*at + *len],
-                Payload::Stitched(stitched) => stitched.as_slice(),
+        for start in buffer.candidates(shred.index).into_iter().flatten() {
+            let Some(advance) = buffer.advance(start) else {
+                continue;
             };
-            match decode_batch(bytes) {
-                Batch::Entries(entries) => {
-                    self.metrics
-                        .batch(BatchOutcome::Decoded, latency, complete.recovered);
-                    self.metrics.entries(entries.len() as u64);
-                    batches.push(DecodedBatch {
-                        first_shred: complete.first_shred,
-                        last_shred: complete.last_shred,
-                        entries,
-                    });
-                }
-                Batch::Marker => {
-                    self.metrics
-                        .batch(BatchOutcome::Marker, latency, complete.recovered)
-                }
-                Batch::Invalid => {
-                    self.metrics
-                        .batch(BatchOutcome::Failed, latency, complete.recovered)
-                }
+            if advance.opened {
+                self.metrics.opened(advance.latency, advance.recovered);
+            }
+            if let Some(outcome) = advance.finished {
+                self.metrics
+                    .batch(outcome, advance.latency, advance.recovered);
+            }
+            if !advance.entries.is_empty() {
+                self.metrics.entries(advance.entries.len() as u64);
+                batches.push(DecodedBatch {
+                    first_shred: start,
+                    last_shred: advance.last_shred,
+                    entries: advance.entries,
+                });
             }
         }
         batches
@@ -349,29 +493,75 @@ impl Assembler {
     }
 }
 
-enum Batch {
-    Entries(Vec<Entry>),
-    Marker,
+/// Where a pass of the decoder left the batch.
+enum Decoded {
+    /// The bytes end part way through an entry, which is what a batch still
+    /// arriving looks like.
+    Waiting,
+    /// Every entry the batch declared has been decoded.
+    Done,
+    /// The bytes are not the entries they claim to be.
     Invalid,
 }
 
-fn decode_batch(batch: &[u8]) -> Batch {
-    if batch.len() < 8 {
-        return Batch::Invalid;
+/// Reads whole entries out of `bytes`, resuming where the last pass stopped and
+/// appending what it gets to `out`.
+///
+/// Only entries that are entirely present are taken, so the pass that finds the
+/// batch cut short leaves everything it could not finish for the next one. The
+/// cost of that is re-reading the bytes of one part-arrived entry per shred,
+/// which is bounded by an entry and is the price of not waiting for the rest of
+/// the batch.
+///
+/// `base` is where `bytes` begins in the batch, since what is handed over is
+/// only the part of it that has not been read yet.
+fn decode(bytes: &[u8], base: usize, progress: &mut Progress, out: &mut Vec<Entry>) -> Decoded {
+    if progress.remaining.is_none() {
+        let at = progress.consumed - base;
+        let Some(count) = bytes.get(at..at + ENTRY_COUNT) else {
+            return Decoded::Waiting;
+        };
+        let Ok(count) = count.try_into() else {
+            return Decoded::Invalid;
+        };
+        progress.remaining = Some(u64::from_le_bytes(count));
+        progress.consumed += ENTRY_COUNT;
     }
-    let Ok(header) = batch[..8].try_into() else {
-        return Batch::Invalid;
-    };
-    if u64::from_le_bytes(header) == 0 {
-        return Batch::Marker;
-    }
-    match bincode::deserialize::<Vec<Entry>>(batch) {
-        Ok(entries) => Batch::Entries(entries),
-        Err(err) => {
-            debug!(bytes = batch.len(), %err, "failed to decode entry batch");
-            Batch::Invalid
+
+    while progress.remaining.is_some_and(|left| left > 0) {
+        let rest = &bytes[progress.consumed - base..];
+        if rest.is_empty() {
+            return Decoded::Waiting;
+        }
+        // Deserializing through a cursor rather than off the slice is what says
+        // where the entry ended, and so where the next one begins.
+        let mut cursor = Cursor::new(rest);
+        match bincode::deserialize_from::<_, Entry>(&mut cursor) {
+            Ok(entry) => {
+                progress.consumed += cursor.position() as usize;
+                progress.remaining = progress.remaining.map(|left| left - 1);
+                out.push(entry);
+            }
+            // Running out of bytes mid-entry is the ordinary case: the shreds
+            // holding the rest of it have not arrived.
+            Err(err) if truncated(&err) => return Decoded::Waiting,
+            Err(err) => {
+                debug!(bytes = rest.len(), %err, "failed to decode entry");
+                return Decoded::Invalid;
+            }
         }
     }
+    Decoded::Done
+}
+
+/// Whether the decoder simply ran out of bytes, as opposed to reading bytes
+/// that could not have come from a leader. The bytes we do hold are whatever the
+/// leader wrote, so anything that is merely incomplete ends at the end.
+fn truncated(err: &bincode::Error) -> bool {
+    matches!(
+        &**err,
+        bincode::ErrorKind::Io(io) if io.kind() == std::io::ErrorKind::UnexpectedEof
+    )
 }
 
 #[cfg(test)]
@@ -440,10 +630,39 @@ mod tests {
         (bincode::serialize(&entries).unwrap(), expected)
     }
 
-    /// Feeds a batch to the assembler split across shreds, and reports the
-    /// transactions that came back out.
-    fn feed(assembler: &mut Assembler, slot: u64, payload: &[u8], reverse: bool) -> usize {
-        let chunks: Vec<&[u8]> = payload.chunks(CHUNK).collect();
+    fn shred(slot: u64, index: u32, data: &[u8], data_complete: bool) -> DataShred<'_> {
+        DataShred {
+            slot,
+            index,
+            fec_set_index: 0,
+            data_complete,
+            last_in_slot: data_complete,
+            reference_tick: 0,
+            data,
+            shard: &[],
+        }
+    }
+
+    /// Transactions in what a shred handed over.
+    fn count(batches: &[DecodedBatch]) -> usize {
+        batches
+            .iter()
+            .flat_map(|batch| &batch.entries)
+            .map(|entry| entry.transactions.len())
+            .sum()
+    }
+
+    /// Feeds a batch to the assembler split across shreds of `chunk` bytes, and
+    /// reports the transactions each shred released. A batch is decoded as it
+    /// arrives, so which shred released what is the whole point.
+    fn feed_each(
+        assembler: &mut Assembler,
+        slot: u64,
+        payload: &[u8],
+        chunk: usize,
+        reverse: bool,
+    ) -> Vec<usize> {
+        let chunks: Vec<&[u8]> = payload.chunks(chunk).collect();
         let last = chunks.len() - 1;
         let mut shreds: Vec<(u32, &[u8])> = chunks
             .into_iter()
@@ -454,27 +673,21 @@ mod tests {
             shreds.reverse();
         }
 
-        let mut transactions = 0;
-        for (index, data) in shreds {
-            let shred = DataShred {
-                slot,
-                index,
-                fec_set_index: 0,
-                data_complete: index as usize == last,
-                last_in_slot: index as usize == last,
-                reference_tick: 0,
-                data,
-                shard: &[],
-            };
-            for batch in assembler.insert(&shred, false) {
-                transactions += batch
-                    .entries
-                    .iter()
-                    .map(|entry| entry.transactions.len())
-                    .sum::<usize>();
-            }
-        }
-        transactions
+        shreds
+            .into_iter()
+            .map(|(index, data)| {
+                let shred = shred(slot, index, data, index as usize == last);
+                count(&assembler.insert(&shred, false))
+            })
+            .collect()
+    }
+
+    /// Feeds a batch to the assembler split across shreds, and reports the
+    /// transactions that came back out.
+    fn feed(assembler: &mut Assembler, slot: u64, payload: &[u8], reverse: bool) -> usize {
+        feed_each(assembler, slot, payload, CHUNK, reverse)
+            .into_iter()
+            .sum()
     }
 
     #[test]
@@ -559,14 +772,14 @@ mod tests {
     fn assembled(order: [u32; 3]) -> (Payload, Vec<u8>) {
         let now = Instant::now();
         let mut buffer = SlotBuffer::new();
-        let mut batches = Vec::new();
         for index in order {
             buffer.insert(index, &[index as u8; 4], index == 2, now, false);
-            batches.append(&mut buffer.complete_batches(index));
         }
 
-        assert_eq!(batches.len(), 1, "the batch was complete");
-        let payload = batches.remove(0).payload;
+        let extent = buffer.extent(0).expect("the run begins at zero");
+        assert!(extent.complete, "shred two closed the batch");
+        let (payload, base) = buffer.payload(0, &extent, 0);
+        assert_eq!(base, 0, "nothing had been read yet");
         let bytes = match &payload {
             Payload::Arena { at, len } => buffer.arena[*at..*at + *len].to_vec(),
             Payload::Stitched(stitched) => stitched.clone(),
@@ -598,20 +811,17 @@ mod tests {
         assert!(chunks.len() > 1, "batch should span several shreds");
 
         let mut assembler = assembler();
-        let duplicate = DataShred {
-            slot: SLOT,
-            index: 0,
-            fec_set_index: 0,
-            data_complete: false,
-            last_in_slot: false,
-            reference_tick: 0,
-            data: chunks[0],
-            shard: &[],
-        };
+        let duplicate = shred(SLOT, 0, chunks[0], false);
+        // The first copy releases whatever entries it already carries whole;
+        // every copy after it is bytes we have already read.
+        let opened = count(&assembler.insert(&duplicate, false));
         // Far more dead bytes than the floor, so compaction has to have run.
         let resends = 8 * COMPACT_FLOOR / CHUNK;
         for _ in 0..resends {
-            assert!(assembler.insert(&duplicate, false).is_empty());
+            assert!(
+                assembler.insert(&duplicate, false).is_empty(),
+                "a resent shred handed over its entries twice"
+            );
         }
 
         let arena = assembler.slots.get(&SLOT).unwrap().arena.len();
@@ -623,7 +833,10 @@ mod tests {
         // The batch still has to come out whole once the rest of it arrives,
         // which is what says compaction rewrote the offsets rather than
         // shuffling the bytes out from under them.
-        assert_eq!(feed(&mut assembler, SLOT, &payload, false), expected);
+        assert_eq!(
+            opened + feed(&mut assembler, SLOT, &payload, false),
+            expected
+        );
     }
 
     /// Spoofed slots can still cost memory until they age out, so the number
@@ -655,28 +868,140 @@ mod tests {
 
     /// A shred that closes a batch also opens the one after it, and the shreds
     /// of that later batch may already all be sitting in the buffer. The
-    /// incremental completion check has to notice the batch the insert created
-    /// a boundary in front of, not only the batch the insert landed in.
+    /// completion check has to notice the batch the insert created a boundary in
+    /// front of, not only the batch the insert landed in.
     #[test]
     fn a_late_terminator_releases_the_batch_behind_it() {
-        let now = Instant::now();
-        let mut buffer = SlotBuffer::new();
-        // The second batch, whole and waiting: shreds 2..=3, closed at 3.
-        buffer.insert(2, &[2; 4], false, now, false);
-        buffer.insert(3, &[3; 4], true, now, false);
+        let (first, first_expected) = batch(2, 2);
+        let (second, second_expected) = batch(2, 2);
+        let halves = |payload: &[u8]| -> Vec<Vec<u8>> {
+            payload
+                .chunks(payload.len().div_ceil(2))
+                .map(<[u8]>::to_vec)
+                .collect()
+        };
+        let (first, second) = (halves(&first), halves(&second));
+
+        let mut assembler = assembler();
+        // The second batch arrives whole while the first is still missing, so
+        // nothing yet says where it begins.
         assert!(
-            buffer.complete_batches(3).is_empty(),
-            "nothing can complete while the first batch is open"
+            assembler
+                .insert(&shred(SLOT, 2, &second[0], false), false)
+                .is_empty()
+        );
+        assert!(
+            assembler
+                .insert(&shred(SLOT, 3, &second[1], true), false)
+                .is_empty(),
+            "no batch can be placed while the first one is open"
         );
 
-        // The terminator of the first batch arrives last and must release both.
-        buffer.insert(0, &[0; 4], false, now, false);
-        buffer.insert(1, &[1; 4], true, now, false);
-        let batches = buffer.complete_batches(1);
-        let ranges: Vec<(u32, u32)> = batches
+        // The terminator of the first batch is what puts a boundary in front of
+        // the second, and it has to release both.
+        let opened = count(&assembler.insert(&shred(SLOT, 0, &first[0], false), false));
+        let released = assembler.insert(&shred(SLOT, 1, &first[1], true), false);
+        let ranges: Vec<(u32, u32)> = released
             .iter()
-            .map(|complete| (complete.first_shred, complete.last_shred))
+            .map(|batch| (batch.first_shred, batch.last_shred))
             .collect();
         assert_eq!(ranges, vec![(0, 1), (2, 3)]);
+        assert_eq!(
+            opened + count(&released),
+            first_expected + second_expected,
+            "every transaction of both batches has to come out exactly once"
+        );
+    }
+
+    /// The point of the whole assembler: a batch is read as it arrives, so the
+    /// entries at its front reach the sniper without waiting for the shreds at
+    /// its back. Nothing may be handed over twice on the way.
+    #[test]
+    fn entries_come_out_before_the_batch_is_whole() {
+        let (payload, expected) = batch(6, 2);
+        let mut assembler = assembler();
+        let released = feed_each(&mut assembler, SLOT, &payload, CHUNK, false);
+        assert!(
+            released.len() > 2,
+            "a batch of one or two shreds proves nothing"
+        );
+
+        let early: usize = released[..released.len() - 1].iter().sum();
+        assert!(
+            early > 0,
+            "nothing came out until the last shred: {released:?}"
+        );
+        assert_eq!(
+            released.iter().sum::<usize>(),
+            expected,
+            "transactions were lost or repeated: {released:?}"
+        );
+    }
+
+    /// Entries straddle shred boundaries, and so does the count a batch opens
+    /// with. Both have to survive being cut anywhere, so the batch is fed in
+    /// pieces far smaller than a leader would ever produce.
+    #[test]
+    fn an_entry_split_across_shreds_is_decoded_once() {
+        let (payload, expected) = batch(4, 2);
+        let mut assembler = assembler();
+        let released = feed_each(&mut assembler, SLOT, &payload, 4, false);
+        assert_eq!(released.iter().sum::<usize>(), expected);
+    }
+
+    /// Shreds that arrived out of order have to be stitched together, and doing
+    /// that for the whole batch on every shred would make a batch cost the
+    /// square of its length to read. Only the bytes still to be decoded are
+    /// worth copying.
+    #[test]
+    fn stitching_only_covers_what_is_left_to_read() {
+        let now = Instant::now();
+        let mut buffer = SlotBuffer::new();
+        // Out of order, so the run is never one stretch of the arena.
+        for index in [2u32, 1, 0, 3] {
+            buffer.insert(index, &[index as u8; 100], index == 3, now, false);
+        }
+
+        let extent = buffer.extent(0).expect("the run begins at zero");
+        let (whole, base) = buffer.payload(0, &extent, 0);
+        assert_eq!(base, 0);
+        assert!(
+            matches!(&whole, Payload::Stitched(bytes) if bytes.len() == 400),
+            "the whole run has to be stitched while none of it has been read"
+        );
+
+        // Two shreds in, only the two behind them are worth copying.
+        let (tail, base) = buffer.payload(0, &extent, 200);
+        assert_eq!(base, 200, "the tail begins where the reading stopped");
+        assert!(
+            matches!(&tail, Payload::Stitched(bytes) if bytes.len() == 200),
+            "the bytes already read were copied again"
+        );
+
+        // Part way into a shred, that shred is still needed whole.
+        let (straddled, base) = buffer.payload(0, &extent, 150);
+        assert_eq!(base, 100, "the shred holding the next entry starts at 100");
+        assert!(matches!(&straddled, Payload::Stitched(bytes) if bytes.len() == 300));
+    }
+
+    /// Bytes that are not entries have to be given up on rather than retried
+    /// for every shred that follows them.
+    #[test]
+    fn a_batch_that_is_not_entries_is_given_up_on() {
+        let mut buffer = SlotBuffer::new();
+        let now = Instant::now();
+        // A count no batch could hold, so the decoder is left owed entries that
+        // never come.
+        buffer.insert(0, &u64::MAX.to_le_bytes(), true, now, false);
+
+        let advance = buffer
+            .advance(0)
+            .expect("the batch was closed by its shred");
+        assert!(matches!(advance.finished, Some(BatchOutcome::Failed)));
+        assert!(advance.entries.is_empty());
+        assert!(
+            buffer.advance(0).is_none(),
+            "a batch already given up on was decoded again"
+        );
     }
 }

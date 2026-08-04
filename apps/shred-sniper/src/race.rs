@@ -3,9 +3,10 @@
 //! Both sides are known by address, so nothing here guesses who is who. What it
 //! does have to work out is *order*: which of two transactions the leader put
 //! first, and how many transactions it put between them. That cannot be read
-//! off arrival times — a batch is decoded when its last shred turns up, so an
-//! early batch delivered late is decoded after a later one. Order comes from
-//! the shred indices instead, which is the order the leader wrote.
+//! off arrival times — batches are decoded as their shreds arrive, in pieces
+//! and out of order, so an early batch delivered late is decoded after a later
+//! one. Order comes from the shred indices instead, which is the order the
+//! leader wrote.
 //!
 //! One caveat rides along with every number here. Transactions inside a single
 //! entry are executed in parallel — the leader put them there precisely because
@@ -203,10 +204,16 @@ impl Tracker {
         })
     }
 
+    /// A batch reaches this in as many pieces as the shreds carrying it allow,
+    /// so a piece extends the span its batch already has rather than replacing
+    /// it — and a hit's place inside its batch is counted from everything
+    /// recorded for that batch before, not from the piece it arrived in.
     pub fn batch(&mut self, slot: u64, batch: &DecodedBatch) {
         let now = Instant::now();
         self.settle(now);
 
+        // Roles are read before the slot is reached for, since the two borrow
+        // the tracker in ways that cannot overlap.
         let mut hits = Vec::new();
         for (entry, decoded) in batch.entries.iter().enumerate() {
             for (transaction, signed) in decoded.transactions.iter().enumerate() {
@@ -221,18 +228,27 @@ impl Tracker {
                 }
             }
         }
-        let span = Span {
-            last_shred: batch.last_shred,
-            entries: batch
-                .entries
-                .iter()
-                .map(|entry| entry.transactions.len() as u32)
-                .collect(),
-        };
 
         let held = self.slots.upsert(slot, now, Slot::new);
-        held.batches.insert(batch.first_shred, span);
-        held.hits.append(&mut hits);
+        let span = held
+            .batches
+            .entry(batch.first_shred)
+            .or_insert_with(|| Span {
+                last_shred: batch.last_shred,
+                entries: Vec::new(),
+            });
+        let base = span.entries.len();
+        span.last_shred = span.last_shred.max(batch.last_shred);
+        span.entries.extend(
+            batch
+                .entries
+                .iter()
+                .map(|entry| entry.transactions.len() as u32),
+        );
+        held.hits.extend(hits.into_iter().map(|hit| Hit {
+            entry: base + hit.entry,
+            ..hit
+        }));
     }
 
     /// A transaction belongs to whoever is paying for it. A bot signs and pays
@@ -386,6 +402,65 @@ mod tests {
             tracker.role(&transaction(&bystander, &bot)).is_none(),
             "the bot is only mentioned"
         );
+    }
+
+    /// A batch reaches the tracker in pieces, so a hit in the second piece sits
+    /// after everything the first one held. Counting its entry from the piece it
+    /// arrived in would place it at the front of its batch and report the bot as
+    /// ahead of a wallet it was behind.
+    #[test]
+    fn a_batch_arriving_in_pieces_keeps_its_order() {
+        let bot = Keypair::new();
+        let wallet = Keypair::new();
+        let mut tracker =
+            Tracker::new(&[bot.pubkey()], &[wallet.pubkey()]).expect("both sides are configured");
+
+        let entry = |payer: &Keypair| crate::entries::Entry {
+            num_hashes: 0,
+            hash: Default::default(),
+            transactions: vec![VersionedTransaction {
+                signatures: vec![Default::default()],
+                message: VersionedMessage::Legacy(Message {
+                    account_keys: vec![payer.pubkey()],
+                    ..Default::default()
+                }),
+            }],
+        };
+
+        // The wallet is in the batch's first entry, the bot in its third, and
+        // the two reach the tracker in separate pieces of the same batch.
+        tracker.batch(
+            7,
+            &DecodedBatch {
+                first_shred: 0,
+                last_shred: 0,
+                entries: vec![entry(&wallet), entry(&Keypair::new())],
+            },
+        );
+        tracker.batch(
+            7,
+            &DecodedBatch {
+                first_shred: 0,
+                last_shred: 1,
+                entries: vec![entry(&bot)],
+            },
+        );
+
+        let slot = tracker.slots.get(&7).expect("the slot is still open");
+        let span = &slot.batches[&0];
+        assert_eq!(span.entries, vec![1, 1, 1], "the pieces have to add up");
+        assert_eq!(span.last_shred, 1, "the batch grew with its second piece");
+
+        let position = |role| {
+            slot.position(
+                slot.hits
+                    .iter()
+                    .find(|hit| hit.role == role)
+                    .expect("both sides are in the slot"),
+            )
+        };
+        assert_eq!(position(Role::Target), (0, 0), "the wallet went first");
+        assert_eq!(position(Role::Searcher), (2, 2), "the bot came third");
     }
 
     /// The bot does not exist yet, so watching a wallet on its own has to be a
