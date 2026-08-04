@@ -1,13 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
 KEYS=/keys
 LEDGER=/genesis
 PROGRAMS=/programs
 
+# SPL Memo. Baked into genesis rather than deployed afterwards so that it is
+# there from slot 0 and no test has to wait for, or depend on, a deploy.
 MEMO_PROGRAM_ID=MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr
 MEMO_SO="$PROGRAMS/spl_memo.so"
 # Pinned to a specific SPL Memo release; the sha256 is what makes "pinned"
 # mean something rather than trusting whatever this URL happens to serve.
-MEMO_SO_URL="https://github.com/solana-program/memo/releases/download/memo-v3.0.0/spl_memo.so"
-MEMO_SO_SHA256="<сюда_реальный_хеш>"
+MEMO_SO_URL="https://github.com/solana-program/memo/releases/download/program%40v3.0.0/spl_memo.so"
+MEMO_SO_SHA256="f520eaf096361abbb9639ea4dc3e5388a87b9330e121f476607b87c46ef67954"
+# The loader the program was built for. Not upgradeable: nothing here ever
+# needs to replace it, and an upgrade authority would only be one more account
+# to explain.
 BPF_LOADER=BPFLoader2111111111111111111111111111111111
 
 if [ -f "$LEDGER/genesis.bin" ]; then
@@ -19,9 +27,13 @@ mkdir -p "$KEYS" "$LEDGER" "$PROGRAMS"
 
 if [ ! -f "$MEMO_SO" ]; then
   echo "[genesis] fetching spl_memo.so"
-  curl -fsSL -o "$MEMO_SO" "$MEMO_SO_URL"
-  echo "$MEMO_SO_SHA256  $MEMO_SO" | sha256sum -c -
+  curl -fsSL -o "$MEMO_SO.tmp" "$MEMO_SO_URL"
+  mv "$MEMO_SO.tmp" "$MEMO_SO"
 fi
+# Checked on every run, not only after a download: a cached or mounted file is
+# exactly the one that can be stale or truncated, and a bad .so does not fail
+# loudly here — it fails as a program that does not run, later, in a validator.
+echo "$MEMO_SO_SHA256  $MEMO_SO" | sha256sum -c -
 
 gen() {
   solana-keygen new --no-bip39-passphrase --silent --force -o "$KEYS/$1.json"

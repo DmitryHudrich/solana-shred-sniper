@@ -35,7 +35,9 @@ services:
       SLOTS_PER_EPOCH: "128"
     volumes:
       - ./scripts:/scripts:ro
-      - ../spl_memo.so:/programs/spl_memo.so:ro
+      # genesis.sh downloads spl_memo.so itself; the volume only keeps it
+      # between runs so a teardown does not mean fetching it again.
+      - programs:/programs
       - keys:/keys
       - genesis:/genesis
     networks:
@@ -306,6 +308,7 @@ networks:
 volumes:
   keys:
   genesis:
+  programs:
   ledger1:
   ledger2:
   ledger3:
