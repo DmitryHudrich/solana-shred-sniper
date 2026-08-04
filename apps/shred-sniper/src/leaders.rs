@@ -8,7 +8,7 @@
 //! to lay delivery quality over who was producing what we were receiving.
 
 use {
-    crate::metrics::Metrics,
+    crate::metrics::SlotMetrics,
     solana_rpc_client::rpc_client::RpcClient,
     std::{
         error::Error,
@@ -36,7 +36,7 @@ struct Window {
     start: u64,
     leaders: Vec<String>,
     /// The distinct leaders of the window, kept so every tick can push an
-    /// explicit zero to whoever is not leading — see [`Metrics::slot_leader`]
+    /// explicit zero to whoever is not leading — see [`SlotMetrics::leader`]
     /// for why silence is not enough.
     roster: Vec<String>,
 }
@@ -57,7 +57,7 @@ impl Window {
 
 pub fn spawn(
     rpc_url: String,
-    metrics: Arc<Metrics>,
+    metrics: Arc<SlotMetrics>,
     exit: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn Error>> {
     thread::Builder::new()
@@ -72,7 +72,7 @@ pub fn spawn(
                 thread::sleep(POLL_INTERVAL);
                 // Zero means the pipeline has not anchored on a slot yet;
                 // there is nothing to look up a leader for.
-                let slot = metrics.current_slot();
+                let slot = metrics.current();
                 if slot == 0 {
                     continue;
                 }
@@ -104,7 +104,7 @@ pub fn spawn(
                     && let Some(current) = window.leader(slot)
                 {
                     for leader in &window.roster {
-                        metrics.slot_leader(leader, leader == current);
+                        metrics.leader(leader, leader == current);
                     }
                 }
             }

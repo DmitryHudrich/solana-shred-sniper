@@ -1,3 +1,4 @@
+mod aged;
 mod config;
 mod entries;
 mod erasure;
@@ -11,6 +12,7 @@ mod pipeline;
 mod race;
 mod receiver;
 mod shred;
+mod tpu;
 
 use {
     config::Config,
@@ -102,7 +104,7 @@ fn run(config: Config) -> Result<(), Box<dyn Error>> {
         batches,
         pool,
         tvu_ports,
-    } = receiver::spawn(node.sockets.tvu, exit.clone(), metrics.clone())?;
+    } = receiver::spawn(node.sockets.tvu, exit.clone(), metrics.queue.clone())?;
     spawn_gossip_stats(
         cluster_info,
         tvu_ports,
@@ -113,14 +115,14 @@ fn run(config: Config) -> Result<(), Box<dyn Error>> {
     // Pointless without an exporter to publish through, so it follows the
     // metrics switch as well as its own.
     if config.leader_schedule_enabled && config.metrics_enabled {
-        leaders::spawn(config.rpc_url.clone(), metrics.clone(), exit.clone())?;
+        leaders::spawn(config.rpc_url.clone(), metrics.slots.clone(), exit.clone())?;
     }
 
-    let firing = fire::spawn(&config, metrics.clone(), exit.clone())?;
+    let firing = fire::spawn(&config, &metrics, exit.clone())?;
 
     let mut pipeline = Pipeline::new(&config, shred_version, metrics.clone(), firing);
     for batch in batches {
-        metrics.queue_popped(batch.received().len() as u64);
+        metrics.queue.popped(batch.received().len() as u64);
         for packet in batch.received() {
             pipeline.packet(packet);
         }
@@ -204,10 +206,10 @@ fn spawn_gossip_stats(
             while !exit.load(Ordering::Relaxed) {
                 thread::sleep(interval);
                 let peers = cluster_info.tvu_peers(|peer| *peer.pubkey()).len();
-                metrics.set_tvu_peers(peers as u64);
+                metrics.node.set_tvu_peers(peers as u64);
                 let drops = match netstat::drops(&tvu_ports) {
                     Ok(drops) => {
-                        metrics.set_udp_drops(drops);
+                        metrics.node.set_udp_drops(drops);
                         drops
                     }
                     Err(err) => {

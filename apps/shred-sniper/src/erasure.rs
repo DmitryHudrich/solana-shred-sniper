@@ -7,7 +7,8 @@
 
 use {
     crate::{
-        metrics::Metrics,
+        aged::AgedMap,
+        metrics::RecoveryMetrics,
         shred::{CodingShred, DataShred},
     },
     reed_solomon_erasure::galois_8::ReedSolomon,
@@ -31,9 +32,6 @@ const BATCH_LIFETIME: Duration = Duration::from_secs(2);
 /// flight while capping what spoofed slot numbers can pin in memory.
 const MAX_FEC_SETS: usize = 1024;
 
-/// Sweeping every batch on every shred would dominate the packet path.
-const EVICT_INTERVAL: Duration = Duration::from_millis(200);
-
 #[derive(Clone, Copy)]
 struct Layout {
     num_data: usize,
@@ -49,18 +47,15 @@ struct FecSet {
     /// Known once any coding shred of the batch arrives.
     layout: Option<Layout>,
     resolved: bool,
-    /// When this batch last saw a shred, which is what it ages out on.
-    updated: Instant,
 }
 
 impl FecSet {
-    fn new(now: Instant) -> Self {
+    fn new() -> Self {
         Self {
             data: HashMap::new(),
             coding: HashMap::new(),
             layout: None,
             resolved: false,
-            updated: now,
         }
     }
 
@@ -72,20 +67,23 @@ impl FecSet {
 }
 
 pub struct Recovery {
-    sets: HashMap<(u64, u32), FecSet>,
+    sets: AgedMap<(u64, u32), FecSet>,
     codecs: HashMap<(usize, usize), Arc<ReedSolomon>>,
-    retention: Duration,
-    last_evicted: Instant,
-    metrics: Arc<Metrics>,
+    metrics: Arc<RecoveryMetrics>,
 }
 
 impl Recovery {
-    pub fn new(retention: Duration, metrics: Arc<Metrics>) -> Self {
+    pub fn new(retention: Duration, metrics: Arc<RecoveryMetrics>) -> Self {
         Self {
-            sets: HashMap::new(),
+            // Batches age out on the same clock as the slots they belong to, so
+            // a recovered shred always lands in a slot the assembler still
+            // holds.
+            sets: AgedMap::new(
+                retention.min(BATCH_LIFETIME),
+                MAX_FEC_SETS,
+                "erasure batches",
+            ),
             codecs: HashMap::new(),
-            retention: retention.min(BATCH_LIFETIME),
-            last_evicted: Instant::now(),
             metrics,
         }
     }
@@ -102,14 +100,10 @@ impl Recovery {
             return Vec::new();
         };
 
-        let now = Instant::now();
-        self.evict(now);
         let key = (shred.slot, shred.fec_set_index);
-        let set = self.sets.entry(key).or_insert_with(|| FecSet::new(now));
-        set.updated = now;
-        if set.resolved {
+        let Some(set) = self.live_set(key) else {
             return Vec::new();
-        }
+        };
         set.data
             .entry(offset)
             .or_insert_with(|| shred.shard.to_vec());
@@ -132,14 +126,10 @@ impl Recovery {
             return Vec::new();
         }
 
-        let now = Instant::now();
-        self.evict(now);
         let key = (shred.slot, shred.fec_set_index);
-        let set = self.sets.entry(key).or_insert_with(|| FecSet::new(now));
-        set.updated = now;
-        if set.resolved {
+        let Some(set) = self.live_set(key) else {
             return Vec::new();
-        }
+        };
         set.layout = Some(Layout {
             num_data,
             num_coding,
@@ -149,6 +139,22 @@ impl Recovery {
             .entry(position)
             .or_insert_with(|| shred.shard.to_vec());
         self.recover(key)
+    }
+
+    /// The batch a shred of `key` belongs to, freshly touched — or `None` once
+    /// it has resolved and further shreds have nothing left to add. Batches a
+    /// sweep ages out while still short of shreds are the recovery failures
+    /// worth counting; resolved ones and bare data-only ones are not.
+    fn live_set(&mut self, key: (u64, u32)) -> Option<&mut FecSet> {
+        let now = Instant::now();
+        let metrics = &self.metrics;
+        self.sets.sweep(now, |_, set| {
+            if !set.resolved && set.layout.is_some() {
+                metrics.incomplete();
+            }
+        });
+        let set = self.sets.upsert(key, now, FecSet::new);
+        if set.resolved { None } else { Some(set) }
     }
 
     fn recover(&mut self, key: (u64, u32)) -> Vec<Vec<u8>> {
@@ -203,7 +209,7 @@ impl Recovery {
                 Ok(codec) => entry.insert(Arc::new(codec)).clone(),
                 Err(err) => {
                     debug!(num_data, num_coding, %err, "unusable erasure batch layout");
-                    self.metrics.fec_set_incomplete();
+                    self.metrics.incomplete();
                     return Vec::new();
                 }
             },
@@ -212,7 +218,7 @@ impl Recovery {
         if let Err(err) = codec.reconstruct_data(&mut shards) {
             let (slot, fec_set_index) = key;
             debug!(slot, fec_set_index, %err, "erasure recovery failed");
-            self.metrics.fec_set_incomplete();
+            self.metrics.incomplete();
             return Vec::new();
         }
 
@@ -220,45 +226,8 @@ impl Recovery {
             .into_iter()
             .filter_map(|index| shards[index].take())
             .collect();
-        self.metrics.shreds_recovered(recovered.len() as u64);
+        self.metrics.recovered(recovered.len() as u64);
         recovered
-    }
-
-    /// Batches age out on the same clock as the slots they belong to, so a
-    /// recovered shred always lands in a slot the assembler still holds. Slot
-    /// numbers cannot drive this: they arrive unauthenticated, and anchoring
-    /// on the highest one seen let a single spoofed shred freeze eviction.
-    fn evict(&mut self, now: Instant) {
-        if now.duration_since(self.last_evicted) < EVICT_INTERVAL && self.sets.len() <= MAX_FEC_SETS
-        {
-            return;
-        }
-        self.last_evicted = now;
-
-        let retention = self.retention;
-        let metrics = &self.metrics;
-        self.sets.retain(|_, set| {
-            let keep = now.duration_since(set.updated) < retention;
-            if !keep && !set.resolved && set.layout.is_some() {
-                metrics.fec_set_incomplete();
-            }
-            keep
-        });
-
-        // Nothing legitimate reaches the cap, so when it is hit the batches to
-        // give up are the ones that have gone quiet.
-        if self.sets.len() > MAX_FEC_SETS {
-            let mut updated: Vec<Instant> = self.sets.values().map(|set| set.updated).collect();
-            updated.sort_unstable();
-            let cutoff = updated[updated.len() - MAX_FEC_SETS];
-            let before = self.sets.len();
-            self.sets.retain(|_, set| set.updated >= cutoff);
-            debug!(
-                dropped = before - self.sets.len(),
-                held = self.sets.len(),
-                "erasure batches over the cap"
-            );
-        }
     }
 }
 
@@ -315,7 +284,8 @@ mod tests {
     fn recovery() -> Recovery {
         Recovery::new(
             RETENTION,
-            Arc::new(crate::metrics::Metrics::new(&global::meter("test"))),
+            crate::metrics::Metrics::new(&global::meter("test"), crate::config::FireVia::Rpc)
+                .recovery,
         )
     }
 

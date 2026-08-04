@@ -1,5 +1,5 @@
 use {
-    crate::metrics::Metrics,
+    crate::metrics::QueueMetrics,
     solana_streamer::{
         packet::{Meta, PACKETS_PER_BATCH, Packet},
         recvmmsg::recv_mmsg,
@@ -101,7 +101,7 @@ impl Pool {
 pub fn spawn(
     sockets: Vec<UdpSocket>,
     exit: Arc<AtomicBool>,
-    metrics: Arc<Metrics>,
+    metrics: Arc<QueueMetrics>,
 ) -> Result<Receivers, Box<dyn Error>> {
     let (sender, batches) = mpsc::channel::<Batch>();
     let mut recyclers = Vec::new();
@@ -153,7 +153,7 @@ fn receive(
     recycled: mpsc::Receiver<Batch>,
     sender: mpsc::Sender<Batch>,
     exit: Arc<AtomicBool>,
-    metrics: Arc<Metrics>,
+    metrics: Arc<QueueMetrics>,
 ) {
     let span = info_span!("tvu_rx", socket = index);
     let _guard = span.enter();
@@ -177,7 +177,7 @@ fn receive(
             Ok(0) => spare = Some(batch),
             Ok(filled) => {
                 batch.filled = filled;
-                metrics.queue_pushed(filled as u64);
+                metrics.pushed(filled as u64);
                 if sender.send(batch).is_err() {
                     debug!("parser dropped, shutting down");
                     break;

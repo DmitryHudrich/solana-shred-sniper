@@ -17,7 +17,12 @@
 //! without asking the RPC whether it worked.
 
 use {
-    crate::{config::Config, keys, metrics::Metrics},
+    crate::{
+        config::{Config, FireVia},
+        keys,
+        metrics::{FireMetrics, Metrics},
+        tpu::LeaderTpus,
+    },
     solana_hash::Hash,
     solana_keypair::Keypair,
     solana_rpc_client::rpc_client::RpcClient,
@@ -78,7 +83,7 @@ struct Pending {
 pub struct Fire {
     triggers: SyncSender<Trigger>,
     pending: Mutex<VecDeque<Pending>>,
-    metrics: Arc<Metrics>,
+    metrics: Arc<FireMetrics>,
 }
 
 impl Fire {
@@ -92,10 +97,10 @@ impl Fire {
             detected,
         };
         match self.triggers.try_send(trigger) {
-            Ok(()) => self.metrics.fire_triggered(),
-            Err(TrySendError::Full(_)) => self.metrics.fire_dropped(),
+            Ok(()) => self.metrics.triggered(),
+            Err(TrySendError::Full(_)) => self.metrics.dropped(),
             // The sender thread is gone; there is nothing left to report to.
-            Err(TrySendError::Disconnected(_)) => self.metrics.fire_dropped(),
+            Err(TrySendError::Disconnected(_)) => self.metrics.dropped(),
         }
     }
 
@@ -117,7 +122,7 @@ impl Fire {
 
         let round_trip = entry.sent.elapsed();
         let slots_behind = slot.saturating_sub(entry.trigger_slot);
-        self.metrics.fire_landed(round_trip, slots_behind);
+        self.metrics.landed(round_trip, slots_behind);
         info!(
             slot,
             signature = %entry.signature,
@@ -152,7 +157,7 @@ impl Fire {
             || held.len() > MAX_PENDING
         {
             if let Some(lost) = held.pop_front() {
-                self.metrics.fire_lost();
+                self.metrics.lost();
                 debug!(signature = %lost.signature, "memo never seen in a block");
             }
         }
@@ -171,7 +176,7 @@ pub struct Firing {
 /// setup: everything else still runs, nothing is ever sent.
 pub fn spawn(
     config: &Config,
-    metrics: Arc<Metrics>,
+    metrics: &Metrics,
     exit: Arc<AtomicBool>,
 ) -> Result<Option<Firing>, Box<dyn Error>> {
     let Some(path) = &config.searcher_keypair else {
@@ -187,9 +192,22 @@ pub fn spawn(
     info!(
         searcher = %searcher,
         memo_program = %config.memo_program,
+        via = ?config.fire_via,
         cooldown_ms = config.fire_cooldown.as_millis(),
         "firing armed"
     );
+
+    let via = match config.fire_via {
+        FireVia::Rpc => Via::Rpc(RpcClient::new_with_timeout(
+            config.rpc_url.clone(),
+            RPC_TIMEOUT,
+        )),
+        FireVia::Tpu => Via::Tpu {
+            tpus: LeaderTpus::spawn(config, &keypair, metrics.slots.clone(), exit.clone())?,
+            fanout: config.tpu_fanout_slots.get(),
+        },
+    };
+    let metrics = metrics.fire.clone();
 
     let (triggers, receiver) = sync_channel(QUEUE_DEPTH);
     let fire = Arc::new(Fire {
@@ -206,7 +224,7 @@ pub fn spawn(
     )?;
 
     let sender = Sender {
-        rpc: RpcClient::new_with_timeout(config.rpc_url.clone(), RPC_TIMEOUT),
+        via,
         keypair,
         searcher,
         memo_program: config.memo_program,
@@ -224,8 +242,16 @@ pub fn spawn(
     Ok(Some(Firing { fire, searcher }))
 }
 
+/// The two ways a fire reaches a leader: through an RPC that forwards it, or
+/// straight to the leader's TPU. One extra hop apart, and otherwise the same
+/// transaction — which is exactly what makes the two comparable.
+enum Via {
+    Rpc(RpcClient),
+    Tpu { tpus: Arc<LeaderTpus>, fanout: u64 },
+}
+
 struct Sender {
-    rpc: RpcClient,
+    via: Via,
     keypair: Keypair,
     searcher: Address,
     memo_program: Address,
@@ -233,7 +259,7 @@ struct Sender {
     cooldown: Duration,
     blockhash: Arc<Blockhash>,
     fire: Arc<Fire>,
-    metrics: Arc<Metrics>,
+    metrics: Arc<FireMetrics>,
 }
 
 impl Sender {
@@ -245,11 +271,11 @@ impl Sender {
 
         while let Ok(trigger) = triggers.recv() {
             if last_fired.is_some_and(|last| last.elapsed() < self.cooldown) {
-                self.metrics.fire_skipped();
+                self.metrics.skipped();
                 continue;
             }
             let Some(blockhash) = self.blockhash.get() else {
-                self.metrics.fire_failed();
+                self.metrics.failed();
                 warn!("no blockhash yet, cannot fire");
                 continue;
             };
@@ -279,7 +305,7 @@ impl Sender {
             blockhash,
         );
         let Some(signature) = transaction.signatures.first().copied() else {
-            self.metrics.fire_failed();
+            self.metrics.failed();
             return;
         };
 
@@ -293,26 +319,13 @@ impl Sender {
         });
 
         let started = Instant::now();
-        let result = self.rpc.send_transaction_with_config(
-            &transaction,
-            RpcSendTransactionConfig {
-                // Preflight simulates the transaction before it is forwarded,
-                // which is a whole extra round trip spent confirming what we
-                // already know a memo does.
-                skip_preflight: true,
-                // Retrying is the RPC holding our transaction and resending it
-                // for us, which lands it in a slot we never chose and reports a
-                // reaction time that was never ours.
-                max_retries: Some(0),
-                ..RpcSendTransactionConfig::default()
-            },
-        );
+        let result = self.send(&transaction, trigger.slot);
         let send = started.elapsed();
         let reaction = trigger.detected.elapsed();
 
         match result {
             Ok(_) => {
-                self.metrics.fire_sent(reaction, send);
+                self.metrics.sent(reaction, send);
                 info!(
                     slot = trigger.slot,
                     target = %trigger.target,
@@ -324,8 +337,38 @@ impl Sender {
             }
             Err(err) => {
                 self.fire.forget(&signature);
-                self.metrics.fire_failed();
+                self.metrics.failed();
                 warn!(slot = trigger.slot, %err, "send failed");
+            }
+        }
+    }
+
+    /// Puts the transaction on the wire by whichever path was configured.
+    fn send(&self, transaction: &Transaction, slot: u64) -> Result<(), String> {
+        match &self.via {
+            Via::Rpc(rpc) => rpc
+                .send_transaction_with_config(
+                    transaction,
+                    RpcSendTransactionConfig {
+                        // Preflight simulates the transaction before it is
+                        // forwarded, which is a whole extra round trip spent
+                        // confirming what we already know a memo does.
+                        skip_preflight: true,
+                        // Retrying is the RPC holding our transaction and
+                        // resending it for us, which lands it in a slot we
+                        // never chose and reports a reaction time that was
+                        // never ours.
+                        max_retries: Some(0),
+                        ..RpcSendTransactionConfig::default()
+                    },
+                )
+                .map(|_| ())
+                .map_err(|err| err.to_string()),
+            Via::Tpu { tpus, fanout } => {
+                let wire = bincode::serialize(transaction).map_err(|err| err.to_string())?;
+                let delivered = tpus.send(&wire, slot, *fanout)?;
+                debug!(?delivered, "sent to leader tpus");
+                Ok(())
             }
         }
     }
@@ -341,7 +384,7 @@ impl Blockhash {
     fn spawn(
         rpc_url: String,
         interval: Duration,
-        metrics: Arc<Metrics>,
+        metrics: Arc<FireMetrics>,
         exit: Arc<AtomicBool>,
     ) -> Result<Arc<Self>, Box<dyn Error>> {
         let blockhash = Arc::new(Self {

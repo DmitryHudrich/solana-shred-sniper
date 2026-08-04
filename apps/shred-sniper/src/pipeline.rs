@@ -8,8 +8,9 @@ use {
         race,
         shred::{self, DataShred},
     },
+    rustc_hash::FxHashSet,
     solana_streamer::packet::Packet,
-    solana_transaction::{Address, versioned::VersionedTransaction},
+    solana_transaction::{Address, Signature, versioned::VersionedTransaction},
     std::{
         collections::HashSet,
         net::IpAddr,
@@ -19,7 +20,8 @@ use {
     tracing::{Level, debug, enabled, info},
 };
 
-const VOTE_PROGRAM: &str = "Vote111111111111111111111111111111111111111";
+const VOTE_PROGRAM: Address =
+    Address::from_str_const("Vote111111111111111111111111111111111111111");
 
 /// Slot numbers come off the wire unauthenticated. Latching on to the highest
 /// one ever seen would let a single spoofed shred freeze the per-slot counters
@@ -61,19 +63,18 @@ pub struct Pipeline {
     recovery: Recovery,
     metrics: Arc<Metrics>,
     shred_version: u16,
-    vote_program: Address,
     snipe_program: Option<Address>,
     /// Peers that have sent us shreds, so a new one can be reported once
-    /// rather than on every packet.
+    /// rather than on every packet. Std hashing, since the wire gets to insert.
     sources: HashSet<IpAddr>,
     /// Fee payers of the wallets being raced. Reacting to one of their
     /// transactions is only possible with slot left to react in, so what these
     /// are here for is to time how much of it there is.
-    watched: HashSet<Address>,
+    watched: FxHashSet<Address>,
     /// Our own fee payers. Kept apart from `watched` because a transaction of
     /// ours is not something to react to — it is the answer to something we
     /// already reacted to, coming back around.
-    searchers: HashSet<Address>,
+    searchers: FxHashSet<Address>,
     /// Present only when a wallet to watch is configured.
     race: Option<race::Tracker>,
     /// Present only when there is a key to sign with.
@@ -101,11 +102,10 @@ impl Pipeline {
         }
 
         Self {
-            assembler: Assembler::new(config.retention, metrics.clone()),
-            recovery: Recovery::new(config.retention, metrics.clone()),
+            assembler: Assembler::new(config.retention, metrics.assembler.clone()),
+            recovery: Recovery::new(config.retention, metrics.recovery.clone()),
             metrics,
             shred_version,
-            vote_program: VOTE_PROGRAM.parse().expect("vote program id is valid"),
             snipe_program: config.snipe_program,
             sources: HashSet::new(),
             watched: config.target_wallets.iter().copied().collect(),
@@ -133,21 +133,23 @@ impl Pipeline {
         let recovered;
         let received = match shred::parse(bytes, shred_version) {
             Some(shred::Shred::Data(data_shred)) => {
-                self.metrics.packet_received(PacketKind::Data);
+                self.metrics.packets.received(PacketKind::Data);
                 if self.sources.insert(from) {
-                    self.metrics.set_turbine_sources(self.sources.len() as u64);
+                    self.metrics
+                        .node
+                        .set_turbine_sources(self.sources.len() as u64);
                     info!(source = %from, "new turbine source");
                 }
                 recovered = self.recovery.insert_data(&data_shred);
                 Some(data_shred)
             }
             Some(shred::Shred::Coding(coding_shred)) => {
-                self.metrics.packet_received(PacketKind::Coding);
+                self.metrics.packets.received(PacketKind::Coding);
                 recovered = self.recovery.insert_coding(&coding_shred);
                 None
             }
             None => {
-                self.metrics.packet_received(PacketKind::Other);
+                self.metrics.packets.received(PacketKind::Other);
                 return;
             }
         };
@@ -163,7 +165,7 @@ impl Pipeline {
             }
         }
 
-        self.metrics.packet_processed(processing_started.elapsed());
+        self.metrics.packets.processed(processing_started.elapsed());
     }
 
     fn data_shred(&mut self, shred: &DataShred<'_>, from_recovery: bool) {
@@ -183,6 +185,7 @@ impl Pipeline {
         // than turbine's delivery.
         if let (Some(offset), false) = (slot_offset, from_recovery) {
             self.metrics
+                .slots
                 .delivery_skew(offset, TICK * u32::from(shred.reference_tick));
         }
 
@@ -213,7 +216,8 @@ impl Pipeline {
         // The first slot we ever see has no predecessor to have taken time.
         let duration = (self.slot.number != 0).then(|| self.slot.started.elapsed());
         self.metrics
-            .slot_completed(slot, duration, self.slot.shreds, self.slot.transactions);
+            .slots
+            .completed(slot, duration, self.slot.shreds, self.slot.transactions);
         self.slot = SlotState::new(slot);
         info!(
             slot,
@@ -226,6 +230,12 @@ impl Pipeline {
     fn report(&self, slot: u64, slot_offset: Option<Duration>, transaction: &VersionedTransaction) {
         let message = &transaction.message;
         let keys = message.static_account_keys();
+        // The wallet being raced is known by who pays, not by what it calls: a
+        // key further down the account list is not the sender.
+        let payer = keys.first();
+        let signature = transaction.signatures.first();
+        self.react(slot, slot_offset, payer, signature);
+
         // Programs a lookup table would resolve are invisible here, so a snipe
         // target reached through one is missed rather than misreported. Counting
         // the transactions that carry one is what puts a size on that blind spot
@@ -239,18 +249,41 @@ impl Pipeline {
                 .iter()
                 .filter_map(|instruction| keys.get(instruction.program_id_index as usize))
         };
+        let vote = programs().any(|program| *program == VOTE_PROGRAM);
+        let hit = self
+            .snipe_program
+            .is_some_and(|target| programs().any(|program| *program == target));
+        self.metrics
+            .transactions
+            .observed(vote, hit, opaque, slot_offset);
 
-        // The wallet being raced is known by who pays, not by what it calls: a
-        // key further down the account list is not the sender.
-        let payer = keys.first();
+        // Base58 encoding every key of every transaction costs more than the
+        // rest of the packet path at mainnet rates, so only a logged one pays
+        // for it.
+        if hit || enabled!(Level::DEBUG) {
+            let programs = programs()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.log(slot, hit, transaction, payer, &programs);
+        }
+    }
+
+    /// The two matches the sniper acts on: a watched wallet's transaction is a
+    /// trigger, and one of our own coming back around is a landing.
+    fn react(
+        &self,
+        slot: u64,
+        slot_offset: Option<Duration>,
+        payer: Option<&Address>,
+        signature: Option<&Signature>,
+    ) {
         if payer.is_some_and(|payer| self.watched.contains(payer)) {
-            self.metrics.watched_transaction(slot_offset);
+            self.metrics.transactions.watched(slot_offset);
             // The clock the reaction is measured on starts here, at the first
             // instant the trigger was knowable, rather than wherever the sender
             // thread happens to pick it up.
-            if let Some(fire) = &self.fire
-                && let Some(signature) = transaction.signatures.first()
-            {
+            if let (Some(fire), Some(signature)) = (&self.fire, signature) {
                 fire.trigger(slot, *signature, Instant::now());
             }
         }
@@ -260,37 +293,24 @@ impl Pipeline {
         // RPC whether the send worked.
         if let Some(fire) = &self.fire
             && payer.is_some_and(|payer| self.searchers.contains(payer))
-            && let Some(signature) = transaction.signatures.first()
+            && let Some(signature) = signature
         {
             fire.landed(signature, slot);
         }
+    }
 
-        let vote = programs().any(|program| *program == self.vote_program);
-        let hit = self
-            .snipe_program
-            .is_some_and(|target| programs().any(|program| *program == target));
-        self.metrics.transaction(vote, hit, opaque, slot_offset);
-
-        // Base58 encoding every key of every transaction costs more than the
-        // rest of the packet path at mainnet rates, so only a logged one pays
-        // for it.
-        if !hit && !enabled!(Level::DEBUG) {
-            return;
-        }
-
-        let signature = transaction
-            .signatures
-            .first()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| "<no signature>".to_string());
-        let payer = keys
-            .first()
+    fn log(
+        &self,
+        slot: u64,
+        hit: bool,
+        transaction: &VersionedTransaction,
+        payer: Option<&Address>,
+        programs: &str,
+    ) {
+        let signature = race::signature(transaction);
+        let payer = payer
             .map(ToString::to_string)
             .unwrap_or_else(|| "?".to_string());
-        let programs = programs()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
 
         if hit {
             info!(slot, %signature, %payer, %programs, "🎯 SNIPE");

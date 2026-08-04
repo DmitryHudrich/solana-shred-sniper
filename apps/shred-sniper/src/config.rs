@@ -32,6 +32,8 @@ pub const ENV_TARGET_WALLETS: &str = "TARGET_WALLETS";
 pub const ENV_TARGET_WALLET_FILES: &str = "TARGET_WALLET_FILES";
 pub const ENV_SEARCHER_KEYPAIR: &str = "SEARCHER_KEYPAIR";
 pub const ENV_MEMO_PROGRAM: &str = "MEMO_PROGRAM";
+pub const ENV_FIRE_VIA: &str = "FIRE_VIA";
+pub const ENV_TPU_FANOUT_SLOTS: &str = "TPU_FANOUT_SLOTS";
 pub const ENV_FIRE_MEMO: &str = "FIRE_MEMO";
 pub const ENV_FIRE_COOLDOWN_MS: &str = "FIRE_COOLDOWN_MS";
 pub const ENV_BLOCKHASH_REFRESH_MS: &str = "BLOCKHASH_REFRESH_MS";
@@ -59,6 +61,13 @@ const DEFAULT_LEADER_SCHEDULE_ENABLED: &str = "true";
 /// SPL Memo v2, which is what `solana transfer --with-memo` and every wallet
 /// reaches for, and what the local cluster bakes into genesis.
 const DEFAULT_MEMO_PROGRAM: &str = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
+/// RPC is the default because it needs nothing beyond an RPC URL; direct TPU
+/// is the experiment, switched on explicitly.
+const DEFAULT_FIRE_VIA: &str = "rpc";
+/// Slots of leaders a direct TPU send covers. Two is the current slot plus one
+/// of margin for firing right at a rotation boundary; leaders hold four slots,
+/// so this usually names a single node.
+const DEFAULT_TPU_FANOUT_SLOTS: &str = "2";
 const DEFAULT_FIRE_MEMO: &str = "sniped";
 /// One reaction per watched transaction is the intent, but a wallet that fires
 /// a burst would otherwise buy a burst back. A cooldown just under a slot keeps
@@ -95,6 +104,36 @@ impl Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+/// How a fire leaves the machine: handed to an RPC to forward, or sent to the
+/// leader's TPU over QUIC directly. Two paths to the same port, kept switchable
+/// so their latencies can be compared on the same metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FireVia {
+    Rpc,
+    Tpu,
+}
+
+impl FireVia {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rpc => "rpc",
+            Self::Tpu => "tpu",
+        }
+    }
+}
+
+impl FromStr for FireVia {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "rpc" => Ok(Self::Rpc),
+            "tpu" => Ok(Self::Tpu),
+            other => Err(format!(r#"expected "rpc" or "tpu", got "{other}""#)),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Config {
     pub entrypoint: SocketAddr,
@@ -124,6 +163,8 @@ pub struct Config {
     /// there is a key to fire with or there is not.
     pub searcher_keypair: Option<PathBuf>,
     pub memo_program: Address,
+    pub fire_via: FireVia,
+    pub tpu_fanout_slots: NonZero<u64>,
     /// Prefix of the memo sent back. The slot and a nonce are appended, because
     /// two identical memos on one blockhash are one transaction.
     pub fire_memo: String,
@@ -181,6 +222,8 @@ impl Config {
             target_wallets: target_wallets()?,
             searcher_keypair: optional_parse(ENV_SEARCHER_KEYPAIR)?,
             memo_program: parse(ENV_MEMO_PROGRAM, DEFAULT_MEMO_PROGRAM)?,
+            fire_via: parse(ENV_FIRE_VIA, DEFAULT_FIRE_VIA)?,
+            tpu_fanout_slots: parse(ENV_TPU_FANOUT_SLOTS, DEFAULT_TPU_FANOUT_SLOTS)?,
             fire_memo: parse(ENV_FIRE_MEMO, DEFAULT_FIRE_MEMO)?,
             fire_cooldown: Duration::from_millis(parse(
                 ENV_FIRE_COOLDOWN_MS,

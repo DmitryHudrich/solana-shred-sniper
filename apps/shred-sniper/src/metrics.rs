@@ -1,5 +1,9 @@
+//! Instruments, grouped by the subsystem that records into them, so each part
+//! of the sniper holds only the handle it actually writes to rather than the
+//! whole registry.
+
 use {
-    crate::config::Config,
+    crate::config::{Config, FireVia},
     opentelemetry::{
         KeyValue, global,
         metrics::{Counter, Gauge, Histogram, Meter, ObservableCounter, ObservableGauge},
@@ -96,79 +100,6 @@ impl BatchOutcome {
     }
 }
 
-#[derive(Default)]
-struct Gauges {
-    tvu_peers: AtomicU64,
-    turbine_sources: AtomicU64,
-    current_slot: AtomicU64,
-    queue_depth: AtomicU64,
-    /// Deepest the queue got since the last export. The plain depth is sampled
-    /// once per export interval and so cannot see a stall shorter than one,
-    /// which is exactly the kind that costs us shreds.
-    queue_depth_peak: AtomicU64,
-    buffered_slots: AtomicU64,
-    /// Datagrams the kernel dropped on our sockets, cumulative since boot of
-    /// the socket. Nothing else we measure moves when this does: an overflowing
-    /// receive buffer looks precisely like a quiet network.
-    udp_drops: AtomicU64,
-    /// Milliseconds since the blockhash the next fire would be signed with was
-    /// fetched. Every one of them is a slot the transaction no longer has to
-    /// land in, so a refresher that has quietly stalled shows up here before it
-    /// shows up as fires that never land.
-    blockhash_age_ms: AtomicU64,
-}
-
-pub struct Metrics {
-    packets_received: Counter<u64>,
-    packets_rejected: Counter<u64>,
-    shreds_received: Counter<u64>,
-    coding_shreds_received: Counter<u64>,
-    shreds_recovered: Counter<u64>,
-    shreds_duplicate: Counter<u64>,
-    shreds_missing: Counter<u64>,
-    fec_sets_incomplete: Counter<u64>,
-    batches: Counter<u64>,
-    entries: Counter<u64>,
-    transactions: Counter<u64>,
-    transactions_opaque: Counter<u64>,
-    snipe_hits: Counter<u64>,
-    snipe_latency: Histogram<f64>,
-    watched_transactions: Counter<u64>,
-    watched_offset: Histogram<f64>,
-    fire_triggers: Counter<u64>,
-    fire_sends: Counter<u64>,
-    fire_reaction: Histogram<f64>,
-    fire_send: Histogram<f64>,
-    fire_landed: Counter<u64>,
-    fire_round_trip: Histogram<f64>,
-    fire_slots_behind: Histogram<u64>,
-    slots: Counter<u64>,
-    slots_unterminated: Counter<u64>,
-    slot_leader: Gauge<u64>,
-    slot_completeness: Histogram<f64>,
-    delivery_skew: Histogram<f64>,
-    pool_exhausted: Counter<u64>,
-    slot_duration: Histogram<f64>,
-    slot_transactions: Histogram<u64>,
-    slot_shreds: Histogram<u64>,
-    batch_latency: Histogram<f64>,
-    packet_latency: Histogram<f64>,
-    recv_batch: Histogram<u64>,
-    gauges: Arc<Gauges>,
-    #[allow(dead_code)]
-    observables: Vec<ObservableGauge<u64>>,
-    #[allow(dead_code)]
-    udp_drops: ObservableCounter<u64>,
-    #[allow(dead_code)]
-    uptime: ObservableGauge<f64>,
-    vote_attrs: [KeyValue; 1],
-    user_attrs: [KeyValue; 1],
-    batch_attrs: [Vec<KeyValue>; 3],
-    recovery_attrs: [Vec<KeyValue>; 2],
-    fire_attrs: [Vec<KeyValue>; 4],
-    landed_attrs: [Vec<KeyValue>; 2],
-}
-
 /// Why a trigger did not turn into a transaction on the wire — or that it did.
 #[derive(Clone, Copy)]
 enum FireOutcome {
@@ -192,80 +123,50 @@ impl FireOutcome {
     }
 }
 
-pub struct MetricsGuard {
-    provider: Option<SdkMeterProvider>,
+#[derive(Default)]
+struct Gauges {
+    tvu_peers: AtomicU64,
+    turbine_sources: AtomicU64,
+    current_slot: AtomicU64,
+    queue_depth: AtomicU64,
+    /// Deepest the queue got since the last export. The plain depth is sampled
+    /// once per export interval and so cannot see a stall shorter than one,
+    /// which is exactly the kind that costs us shreds.
+    queue_depth_peak: AtomicU64,
+    buffered_slots: AtomicU64,
+    /// Datagrams the kernel dropped on our sockets, cumulative since boot of
+    /// the socket. Nothing else we measure moves when this does: an overflowing
+    /// receive buffer looks precisely like a quiet network.
+    udp_drops: AtomicU64,
+    /// Milliseconds since the blockhash the next fire would be signed with was
+    /// fetched. Every one of them is a slot the transaction no longer has to
+    /// land in, so a refresher that has quietly stalled shows up here before it
+    /// shows up as fires that never land.
+    blockhash_age_ms: AtomicU64,
 }
 
-impl Drop for MetricsGuard {
-    fn drop(&mut self) {
-        if let Some(provider) = self.provider.take()
-            && let Err(err) = provider.shutdown()
-        {
-            warn!(%err, "failed to shut down meter provider");
-        }
-    }
-}
-
-pub fn init(config: &Config) -> (Arc<Metrics>, MetricsGuard) {
-    let provider = if config.metrics_enabled {
-        match build_provider(config) {
-            Ok(provider) => {
-                global::set_meter_provider(provider.clone());
-                info!(
-                    endpoint = %config.otlp_endpoint,
-                    interval_secs = config.metrics_export_interval.as_secs(),
-                    "otlp metrics exporter started"
-                );
-                Some(provider)
-            }
-            Err(err) => {
-                warn!(%err, "failed to start otlp metrics exporter, metrics disabled");
-                None
-            }
-        }
-    } else {
-        info!("metrics disabled");
-        None
-    };
-
-    let metrics = Arc::new(Metrics::new(&global::meter(SCOPE)));
-    (metrics, MetricsGuard { provider })
-}
-
-fn build_provider(
-    config: &Config,
-) -> Result<SdkMeterProvider, opentelemetry_otlp::ExporterBuildError> {
-    let endpoint = format!(
-        "{}{METRICS_PATH}",
-        config.otlp_endpoint.trim_end_matches('/')
-    );
-    let exporter = MetricExporter::builder()
-        .with_http()
-        .with_protocol(Protocol::HttpBinary)
-        .with_endpoint(endpoint)
-        .with_timeout(config.metrics_export_timeout)
-        .with_temporality(Temporality::Cumulative)
-        .build()?;
-
-    let reader = PeriodicReader::builder(exporter)
-        .with_interval(config.metrics_export_interval)
-        .build();
-
-    let resource = Resource::builder()
-        .with_attributes([
-            KeyValue::new(SERVICE_NAME, config.service_name.clone()),
-            KeyValue::new(SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
-        ])
-        .build();
-
-    Ok(SdkMeterProvider::builder()
-        .with_resource(resource)
-        .with_reader(reader)
-        .build())
+/// One handle per subsystem. The `Arc` fields are the ones handed out to
+/// threads or components of their own; the rest are only ever reached through
+/// the `Arc<Metrics>` the pipeline holds.
+pub struct Metrics {
+    pub packets: PacketMetrics,
+    pub queue: Arc<QueueMetrics>,
+    pub assembler: Arc<AssemblerMetrics>,
+    pub recovery: Arc<RecoveryMetrics>,
+    pub transactions: TransactionMetrics,
+    pub slots: Arc<SlotMetrics>,
+    pub fire: Arc<FireMetrics>,
+    pub node: NodeMetrics,
+    #[allow(dead_code)]
+    observables: Vec<ObservableGauge<u64>>,
+    #[allow(dead_code)]
+    udp_drops: ObservableCounter<u64>,
+    #[allow(dead_code)]
+    uptime: ObservableGauge<f64>,
 }
 
 impl Metrics {
-    pub(crate) fn new(meter: &Meter) -> Self {
+    pub(crate) fn new(meter: &Meter, via: FireVia) -> Self {
         let gauges = Arc::new(Gauges::default());
         let started = Instant::now();
 
@@ -352,6 +253,33 @@ impl Metrics {
             .build();
 
         Self {
+            packets: PacketMetrics::new(meter),
+            queue: Arc::new(QueueMetrics::new(meter, gauges.clone())),
+            assembler: Arc::new(AssemblerMetrics::new(meter, gauges.clone())),
+            recovery: Arc::new(RecoveryMetrics::new(meter)),
+            transactions: TransactionMetrics::new(meter),
+            slots: Arc::new(SlotMetrics::new(meter, gauges.clone())),
+            fire: Arc::new(FireMetrics::new(meter, gauges.clone(), via)),
+            node: NodeMetrics { gauges },
+            observables,
+            udp_drops,
+            uptime,
+        }
+    }
+}
+
+/// The parser's own view of the wire: what came in and what it cost to look at.
+pub struct PacketMetrics {
+    packets_received: Counter<u64>,
+    packets_rejected: Counter<u64>,
+    shreds_received: Counter<u64>,
+    coding_shreds_received: Counter<u64>,
+    packet_latency: Histogram<f64>,
+}
+
+impl PacketMetrics {
+    fn new(meter: &Meter) -> Self {
+        Self {
             packets_received: meter
                 .u64_counter("sniper.packets.received")
                 .with_unit("{packet}")
@@ -372,11 +300,101 @@ impl Metrics {
                 .with_unit("{shred}")
                 .with_description("Coding shreds parsed from turbine")
                 .build(),
-            shreds_recovered: meter
-                .u64_counter("sniper.shreds.recovered")
-                .with_unit("{shred}")
-                .with_description("Data shreds reconstructed from their erasure batch")
+            packet_latency: meter
+                .f64_histogram("sniper.packet.latency")
+                .with_unit("s")
+                .with_description("Time spent parsing and assembling a single packet")
+                .with_boundaries(PACKET_BUCKETS.to_vec())
                 .build(),
+        }
+    }
+
+    pub fn received(&self, kind: PacketKind) {
+        self.packets_received.add(1, &[]);
+        match kind {
+            PacketKind::Data => self.shreds_received.add(1, &[]),
+            PacketKind::Coding => self.coding_shreds_received.add(1, &[]),
+            PacketKind::Other => self.packets_rejected.add(1, &[]),
+        }
+    }
+
+    pub fn processed(&self, elapsed: Duration) {
+        self.packet_latency.record(elapsed.as_secs_f64(), &[]);
+    }
+}
+
+/// The path between the receiver threads and the parser.
+pub struct QueueMetrics {
+    recv_batch: Histogram<u64>,
+    pool_exhausted: Counter<u64>,
+    gauges: Arc<Gauges>,
+}
+
+impl QueueMetrics {
+    fn new(meter: &Meter, gauges: Arc<Gauges>) -> Self {
+        Self {
+            recv_batch: meter
+                .u64_histogram("sniper.recv.batch")
+                .with_unit("{packet}")
+                .with_description("Datagrams returned by a single recvmmsg call")
+                .with_boundaries(RECV_BATCH_BUCKETS.to_vec())
+                .build(),
+            pool_exhausted: meter
+                .u64_counter("sniper.pool.exhausted")
+                .with_unit("{batch}")
+                .with_description(
+                    "Times a receiver had to allocate because the parser had not returned a batch",
+                )
+                .build(),
+            gauges,
+        }
+    }
+
+    /// One `recvmmsg` return: `packets` datagrams handed to the parser at once.
+    pub fn pushed(&self, packets: u64) {
+        self.recv_batch.record(packets, &[]);
+        let depth = self
+            .gauges
+            .queue_depth
+            .fetch_add(packets, Ordering::Relaxed)
+            + packets;
+        self.gauges
+            .queue_depth_peak
+            .fetch_max(depth, Ordering::Relaxed);
+    }
+
+    pub fn popped(&self, packets: u64) {
+        let _ =
+            self.gauges
+                .queue_depth
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |depth| {
+                    Some(depth.saturating_sub(packets))
+                });
+    }
+
+    pub fn pool_exhausted(&self) {
+        self.pool_exhausted.add(1, &[]);
+    }
+}
+
+/// What became of shreds once they were buffered: duplicates, batches, and the
+/// accounting done when a slot is finally let go.
+pub struct AssemblerMetrics {
+    shreds_duplicate: Counter<u64>,
+    shreds_missing: Counter<u64>,
+    batches: Counter<u64>,
+    batch_latency: Histogram<f64>,
+    entries: Counter<u64>,
+    slots_unterminated: Counter<u64>,
+    slot_completeness: Histogram<f64>,
+    batch_attrs: [Vec<KeyValue>; 3],
+    recovery_attrs: [Vec<KeyValue>; 2],
+    gauges: Arc<Gauges>,
+}
+
+impl AssemblerMetrics {
+    fn new(meter: &Meter, gauges: Arc<Gauges>) -> Self {
+        Self {
             shreds_duplicate: meter
                 .u64_counter("sniper.shreds.duplicate")
                 .with_unit("{shred}")
@@ -387,21 +405,141 @@ impl Metrics {
                 .with_unit("{shred}")
                 .with_description("Data shreds never received before the slot was evicted")
                 .build(),
-            fec_sets_incomplete: meter
-                .u64_counter("sniper.fec_sets.incomplete")
-                .with_unit("{batch}")
-                .with_description("Erasure batches that could not be recovered")
-                .build(),
             batches: meter
                 .u64_counter("sniper.batches")
                 .with_unit("{batch}")
                 .with_description("Entry batches reassembled from shreds, by outcome")
+                .build(),
+            batch_latency: meter
+                .f64_histogram("sniper.batch.latency")
+                .with_unit("s")
+                .with_description("Time from a batch's first shred to its decoded transactions")
+                .with_boundaries(SECOND_BUCKETS.to_vec())
                 .build(),
             entries: meter
                 .u64_counter("sniper.entries")
                 .with_unit("{entry}")
                 .with_description("Entries decoded from batches")
                 .build(),
+            slots_unterminated: meter
+                .u64_counter("sniper.slots.unterminated")
+                .with_unit("{slot}")
+                .with_description(
+                    "Slots evicted without their closing shred, whose true size stayed unknown",
+                )
+                .build(),
+            slot_completeness: meter
+                .f64_histogram("sniper.slot.completeness")
+                // An annotation unit rather than "1": the exporter drops braced
+                // units, so the Prometheus name stays predictable.
+                .with_unit("{fraction}")
+                .with_description("Fraction of a slot's data shreds we actually saw")
+                .with_boundaries(RATIO_BUCKETS.to_vec())
+                .build(),
+            batch_attrs: [
+                vec![KeyValue::new("outcome", BatchOutcome::Decoded.as_str())],
+                vec![KeyValue::new("outcome", BatchOutcome::Marker.as_str())],
+                vec![KeyValue::new("outcome", BatchOutcome::Failed.as_str())],
+            ],
+            recovery_attrs: [
+                vec![KeyValue::new("recovered", false)],
+                vec![KeyValue::new("recovered", true)],
+            ],
+            gauges,
+        }
+    }
+
+    pub fn duplicate(&self) {
+        self.shreds_duplicate.add(1, &[]);
+    }
+
+    pub fn missing(&self, count: u64) {
+        self.shreds_missing.add(count, &[]);
+    }
+
+    /// `recovered` tags the latency rather than the count: what we want to know
+    /// is whether waiting on erasure recovery costs a batch time, and that only
+    /// shows up as a difference between the two distributions.
+    pub fn batch(&self, outcome: BatchOutcome, latency: Duration, recovered: bool) {
+        let attrs = match outcome {
+            BatchOutcome::Decoded => &self.batch_attrs[0],
+            BatchOutcome::Marker => &self.batch_attrs[1],
+            BatchOutcome::Failed => &self.batch_attrs[2],
+        };
+        self.batches.add(1, attrs);
+        self.batch_latency.record(
+            latency.as_secs_f64(),
+            &self.recovery_attrs[usize::from(recovered)],
+        );
+    }
+
+    pub fn entries(&self, count: u64) {
+        self.entries.add(count, &[]);
+    }
+
+    pub fn completeness(&self, received: u64, expected: u64) {
+        if expected == 0 {
+            return;
+        }
+        self.slot_completeness
+            .record(received as f64 / expected as f64, &[]);
+    }
+
+    pub fn unterminated(&self) {
+        self.slots_unterminated.add(1, &[]);
+    }
+
+    pub fn set_buffered_slots(&self, slots: u64) {
+        self.gauges.buffered_slots.store(slots, Ordering::Relaxed);
+    }
+}
+
+/// Erasure recovery: shreds rebuilt, and batches that never could be.
+pub struct RecoveryMetrics {
+    shreds_recovered: Counter<u64>,
+    fec_sets_incomplete: Counter<u64>,
+}
+
+impl RecoveryMetrics {
+    fn new(meter: &Meter) -> Self {
+        Self {
+            shreds_recovered: meter
+                .u64_counter("sniper.shreds.recovered")
+                .with_unit("{shred}")
+                .with_description("Data shreds reconstructed from their erasure batch")
+                .build(),
+            fec_sets_incomplete: meter
+                .u64_counter("sniper.fec_sets.incomplete")
+                .with_unit("{batch}")
+                .with_description("Erasure batches that could not be recovered")
+                .build(),
+        }
+    }
+
+    pub fn recovered(&self, count: u64) {
+        self.shreds_recovered.add(count, &[]);
+    }
+
+    pub fn incomplete(&self) {
+        self.fec_sets_incomplete.add(1, &[]);
+    }
+}
+
+/// Transactions as they surface out of decoded batches.
+pub struct TransactionMetrics {
+    transactions: Counter<u64>,
+    transactions_opaque: Counter<u64>,
+    snipe_hits: Counter<u64>,
+    snipe_latency: Histogram<f64>,
+    watched_transactions: Counter<u64>,
+    watched_offset: Histogram<f64>,
+    vote_attrs: [KeyValue; 1],
+    user_attrs: [KeyValue; 1],
+}
+
+impl TransactionMetrics {
+    fn new(meter: &Meter) -> Self {
+        Self {
             transactions: meter
                 .u64_counter("sniper.transactions")
                 .with_unit("{transaction}")
@@ -441,6 +579,162 @@ impl Metrics {
                 )
                 .with_boundaries(SLOT_OFFSET_BUCKETS.to_vec())
                 .build(),
+            vote_attrs: [KeyValue::new("kind", "vote")],
+            user_attrs: [KeyValue::new("kind", "user")],
+        }
+    }
+
+    /// `slot_offset` is how far into the slot we were when this transaction
+    /// surfaced. A hit is only worth anything if that number is small, so the
+    /// count alone never answers whether a snipe was actionable. It is `None`
+    /// for a transaction of a slot we are no longer anchored on, where there is
+    /// no start to measure from and a number would only be a flattering one.
+    pub fn observed(&self, vote: bool, hit: bool, opaque: bool, slot_offset: Option<Duration>) {
+        let attrs = if vote {
+            &self.vote_attrs
+        } else {
+            &self.user_attrs
+        };
+        self.transactions.add(1, attrs);
+        if opaque {
+            self.transactions_opaque.add(1, &[]);
+        }
+        if hit {
+            self.snipe_hits.add(1, &[]);
+            if let Some(offset) = slot_offset {
+                self.snipe_latency.record(offset.as_secs_f64(), &[]);
+            }
+        }
+    }
+
+    /// A transaction the watched wallet paid for. The offset is the reason this
+    /// exists: reacting to the wallet means landing in what is left of the slot
+    /// after this, so the distribution of offsets is what says whether reacting
+    /// is possible at all — before a line of sending code is written.
+    pub fn watched(&self, slot_offset: Option<Duration>) {
+        self.watched_transactions.add(1, &[]);
+        if let Some(offset) = slot_offset {
+            self.watched_offset.record(offset.as_secs_f64(), &[]);
+        }
+    }
+}
+
+/// Slots as wholes: their pace, their size, and who was leading them.
+pub struct SlotMetrics {
+    slots: Counter<u64>,
+    slot_duration: Histogram<f64>,
+    slot_shreds: Histogram<u64>,
+    slot_transactions: Histogram<u64>,
+    delivery_skew: Histogram<f64>,
+    slot_leader: Gauge<u64>,
+    gauges: Arc<Gauges>,
+}
+
+impl SlotMetrics {
+    fn new(meter: &Meter, gauges: Arc<Gauges>) -> Self {
+        Self {
+            slots: meter
+                .u64_counter("sniper.slots")
+                .with_unit("{slot}")
+                .with_description("Slots observed on the wire")
+                .build(),
+            slot_duration: meter
+                .f64_histogram("sniper.slot.duration")
+                .with_unit("s")
+                .with_description("Wall time between the first shred of consecutive slots")
+                .with_boundaries(SECOND_BUCKETS.to_vec())
+                .build(),
+            slot_shreds: meter
+                .u64_histogram("sniper.slot.shreds")
+                .with_unit("{shred}")
+                .with_description("Data shreds received per slot")
+                .with_boundaries(COUNT_BUCKETS.to_vec())
+                .build(),
+            slot_transactions: meter
+                .u64_histogram("sniper.slot.transactions")
+                .with_unit("{transaction}")
+                .with_description("Transactions decoded per slot")
+                .with_boundaries(COUNT_BUCKETS.to_vec())
+                .build(),
+            delivery_skew: meter
+                .f64_histogram("sniper.delivery.skew")
+                .with_unit("s")
+                .with_description(
+                    "Arrival offset within the slot minus the leader's own production offset",
+                )
+                .with_boundaries(SKEW_BUCKETS.to_vec())
+                .build(),
+            slot_leader: meter
+                .u64_gauge("sniper.slot.leader")
+                .with_unit("{leader}")
+                .with_description(
+                    "1 for the validator leading the slot currently on the wire, 0 for everyone \
+                     else in the fetched schedule window",
+                )
+                .build(),
+            gauges,
+        }
+    }
+
+    pub fn completed(&self, slot: u64, duration: Option<Duration>, shreds: u64, transactions: u64) {
+        self.slots.add(1, &[]);
+        self.gauges.current_slot.store(slot, Ordering::Relaxed);
+        if let Some(duration) = duration {
+            self.slot_duration.record(duration.as_secs_f64(), &[]);
+        }
+        self.slot_shreds.record(shreds, &[]);
+        self.slot_transactions.record(transactions, &[]);
+    }
+
+    /// How far our arrival time for a shred drifts from where the leader says
+    /// it produced it. The absolute value is meaningless — the two clocks share
+    /// no origin — but its spread across a slot is delivery jitter, measured
+    /// without any second source of truth.
+    pub fn delivery_skew(&self, arrival: Duration, produced: Duration) {
+        self.delivery_skew
+            .record(arrival.as_secs_f64() - produced.as_secs_f64(), &[]);
+    }
+
+    /// The zeros matter as much as the one: the collector keeps serving a
+    /// series it stopped hearing about at its last value, so a leader that
+    /// rotates out has to be written down as not leading rather than simply
+    /// dropped.
+    pub fn leader(&self, leader: &str, leading: bool) {
+        self.slot_leader.record(
+            u64::from(leading),
+            &[KeyValue::new("leader", leader.to_string())],
+        );
+    }
+
+    /// Highest slot seen on the wire, as [`Self::completed`] left it.
+    pub fn current(&self) -> u64 {
+        self.gauges.current_slot.load(Ordering::Relaxed)
+    }
+}
+
+/// The firing loop, from trigger to landing.
+pub struct FireMetrics {
+    fire_triggers: Counter<u64>,
+    fire_sends: Counter<u64>,
+    fire_reaction: Histogram<f64>,
+    fire_send: Histogram<f64>,
+    fire_landed: Counter<u64>,
+    fire_round_trip: Histogram<f64>,
+    fire_slots_behind: Histogram<u64>,
+    fire_attrs: [Vec<KeyValue>; 4],
+    landed_attrs: [Vec<KeyValue>; 2],
+    /// The path fires leave by, carried on every measurement of the loop. The
+    /// two paths are one hop apart and otherwise identical, so without this the
+    /// numbers of a run through the RPC and a run straight to the leader are
+    /// the same series and only the operator's memory says which is which.
+    via_attrs: Vec<KeyValue>,
+    gauges: Arc<Gauges>,
+}
+
+impl FireMetrics {
+    fn new(meter: &Meter, gauges: Arc<Gauges>, via: FireVia) -> Self {
+        let via = KeyValue::new("via", via.as_str());
+        Self {
             fire_triggers: meter
                 .u64_counter("sniper.fire.triggers")
                 .with_unit("{transaction}")
@@ -495,233 +789,41 @@ impl Metrics {
                 )
                 .with_boundaries(SLOTS_BEHIND_BUCKETS.to_vec())
                 .build(),
-            slots: meter
-                .u64_counter("sniper.slots")
-                .with_unit("{slot}")
-                .with_description("Slots observed on the wire")
-                .build(),
-            slot_leader: meter
-                .u64_gauge("sniper.slot.leader")
-                .with_unit("{leader}")
-                .with_description(
-                    "1 for the validator leading the slot currently on the wire, 0 for everyone \
-                     else in the fetched schedule window",
-                )
-                .build(),
-            slots_unterminated: meter
-                .u64_counter("sniper.slots.unterminated")
-                .with_unit("{slot}")
-                .with_description(
-                    "Slots evicted without their closing shred, whose true size stayed unknown",
-                )
-                .build(),
-            slot_completeness: meter
-                .f64_histogram("sniper.slot.completeness")
-                // An annotation unit rather than "1": the exporter drops braced
-                // units, so the Prometheus name stays predictable.
-                .with_unit("{fraction}")
-                .with_description("Fraction of a slot's data shreds we actually saw")
-                .with_boundaries(RATIO_BUCKETS.to_vec())
-                .build(),
-            delivery_skew: meter
-                .f64_histogram("sniper.delivery.skew")
-                .with_unit("s")
-                .with_description(
-                    "Arrival offset within the slot minus the leader's own production offset",
-                )
-                .with_boundaries(SKEW_BUCKETS.to_vec())
-                .build(),
-            pool_exhausted: meter
-                .u64_counter("sniper.pool.exhausted")
-                .with_unit("{batch}")
-                .with_description(
-                    "Times a receiver had to allocate because the parser had not returned a batch",
-                )
-                .build(),
-            slot_duration: meter
-                .f64_histogram("sniper.slot.duration")
-                .with_unit("s")
-                .with_description("Wall time between the first shred of consecutive slots")
-                .with_boundaries(SECOND_BUCKETS.to_vec())
-                .build(),
-            slot_transactions: meter
-                .u64_histogram("sniper.slot.transactions")
-                .with_unit("{transaction}")
-                .with_description("Transactions decoded per slot")
-                .with_boundaries(COUNT_BUCKETS.to_vec())
-                .build(),
-            slot_shreds: meter
-                .u64_histogram("sniper.slot.shreds")
-                .with_unit("{shred}")
-                .with_description("Data shreds received per slot")
-                .with_boundaries(COUNT_BUCKETS.to_vec())
-                .build(),
-            batch_latency: meter
-                .f64_histogram("sniper.batch.latency")
-                .with_unit("s")
-                .with_description("Time from a batch's first shred to its decoded transactions")
-                .with_boundaries(SECOND_BUCKETS.to_vec())
-                .build(),
-            packet_latency: meter
-                .f64_histogram("sniper.packet.latency")
-                .with_unit("s")
-                .with_description("Time spent parsing and assembling a single packet")
-                .with_boundaries(PACKET_BUCKETS.to_vec())
-                .build(),
-            recv_batch: meter
-                .u64_histogram("sniper.recv.batch")
-                .with_unit("{packet}")
-                .with_description("Datagrams returned by a single recvmmsg call")
-                .with_boundaries(RECV_BATCH_BUCKETS.to_vec())
-                .build(),
-            gauges,
-            observables,
-            udp_drops,
-            uptime,
-            vote_attrs: [KeyValue::new("kind", "vote")],
-            user_attrs: [KeyValue::new("kind", "user")],
-            batch_attrs: [
-                vec![KeyValue::new("outcome", BatchOutcome::Decoded.as_str())],
-                vec![KeyValue::new("outcome", BatchOutcome::Marker.as_str())],
-                vec![KeyValue::new("outcome", BatchOutcome::Failed.as_str())],
-            ],
-            recovery_attrs: [
-                vec![KeyValue::new("recovered", false)],
-                vec![KeyValue::new("recovered", true)],
-            ],
             fire_attrs: [
-                vec![KeyValue::new("outcome", FireOutcome::Sent.as_str())],
-                vec![KeyValue::new("outcome", FireOutcome::Failed.as_str())],
-                vec![KeyValue::new("outcome", FireOutcome::Skipped.as_str())],
-                vec![KeyValue::new("outcome", FireOutcome::Dropped.as_str())],
+                vec![
+                    KeyValue::new("outcome", FireOutcome::Sent.as_str()),
+                    via.clone(),
+                ],
+                vec![
+                    KeyValue::new("outcome", FireOutcome::Failed.as_str()),
+                    via.clone(),
+                ],
+                vec![
+                    KeyValue::new("outcome", FireOutcome::Skipped.as_str()),
+                    via.clone(),
+                ],
+                vec![
+                    KeyValue::new("outcome", FireOutcome::Dropped.as_str()),
+                    via.clone(),
+                ],
             ],
             landed_attrs: [
-                vec![KeyValue::new("outcome", "landed")],
-                vec![KeyValue::new("outcome", "lost")],
+                vec![KeyValue::new("outcome", "landed"), via.clone()],
+                vec![KeyValue::new("outcome", "lost"), via.clone()],
             ],
-        }
-    }
-
-    pub fn packet_received(&self, kind: PacketKind) {
-        self.packets_received.add(1, &[]);
-        match kind {
-            PacketKind::Data => self.shreds_received.add(1, &[]),
-            PacketKind::Coding => self.coding_shreds_received.add(1, &[]),
-            PacketKind::Other => self.packets_rejected.add(1, &[]),
-        }
-    }
-
-    pub fn shreds_recovered(&self, count: u64) {
-        self.shreds_recovered.add(count, &[]);
-    }
-
-    pub fn fec_set_incomplete(&self) {
-        self.fec_sets_incomplete.add(1, &[]);
-    }
-
-    pub fn packet_processed(&self, elapsed: Duration) {
-        self.packet_latency.record(elapsed.as_secs_f64(), &[]);
-    }
-
-    pub fn shred_duplicate(&self) {
-        self.shreds_duplicate.add(1, &[]);
-    }
-
-    pub fn shreds_missing(&self, count: u64) {
-        self.shreds_missing.add(count, &[]);
-    }
-
-    /// `recovered` tags the latency rather than the count: what we want to know
-    /// is whether waiting on erasure recovery costs a batch time, and that only
-    /// shows up as a difference between the two distributions.
-    pub fn batch(&self, outcome: BatchOutcome, latency: Duration, recovered: bool) {
-        let attrs = match outcome {
-            BatchOutcome::Decoded => &self.batch_attrs[0],
-            BatchOutcome::Marker => &self.batch_attrs[1],
-            BatchOutcome::Failed => &self.batch_attrs[2],
-        };
-        self.batches.add(1, attrs);
-        self.batch_latency.record(
-            latency.as_secs_f64(),
-            &self.recovery_attrs[usize::from(recovered)],
-        );
-    }
-
-    /// How far our arrival time for a shred drifts from where the leader says
-    /// it produced it. The absolute value is meaningless — the two clocks share
-    /// no origin — but its spread across a slot is delivery jitter, measured
-    /// without any second source of truth.
-    pub fn delivery_skew(&self, arrival: Duration, produced: Duration) {
-        self.delivery_skew
-            .record(arrival.as_secs_f64() - produced.as_secs_f64(), &[]);
-    }
-
-    pub fn slot_completeness(&self, received: u64, expected: u64) {
-        if expected == 0 {
-            return;
-        }
-        self.slot_completeness
-            .record(received as f64 / expected as f64, &[]);
-    }
-
-    pub fn slot_unterminated(&self) {
-        self.slots_unterminated.add(1, &[]);
-    }
-
-    pub fn pool_exhausted(&self) {
-        self.pool_exhausted.add(1, &[]);
-    }
-
-    pub fn set_udp_drops(&self, drops: u64) {
-        self.gauges.udp_drops.store(drops, Ordering::Relaxed);
-    }
-
-    pub fn entries(&self, count: u64) {
-        self.entries.add(count, &[]);
-    }
-
-    /// `slot_offset` is how far into the slot we were when this transaction
-    /// surfaced. A hit is only worth anything if that number is small, so the
-    /// count alone never answers whether a snipe was actionable. It is `None`
-    /// for a transaction of a slot we are no longer anchored on, where there is
-    /// no start to measure from and a number would only be a flattering one.
-    pub fn transaction(&self, vote: bool, hit: bool, opaque: bool, slot_offset: Option<Duration>) {
-        let attrs = if vote {
-            &self.vote_attrs
-        } else {
-            &self.user_attrs
-        };
-        self.transactions.add(1, attrs);
-        if opaque {
-            self.transactions_opaque.add(1, &[]);
-        }
-        if hit {
-            self.snipe_hits.add(1, &[]);
-            if let Some(offset) = slot_offset {
-                self.snipe_latency.record(offset.as_secs_f64(), &[]);
-            }
-        }
-    }
-
-    /// A transaction the watched wallet paid for. The offset is the reason this
-    /// exists: reacting to the wallet means landing in what is left of the slot
-    /// after this, so the distribution of offsets is what says whether reacting
-    /// is possible at all — before a line of sending code is written.
-    pub fn watched_transaction(&self, slot_offset: Option<Duration>) {
-        self.watched_transactions.add(1, &[]);
-        if let Some(offset) = slot_offset {
-            self.watched_offset.record(offset.as_secs_f64(), &[]);
+            via_attrs: vec![via],
+            gauges,
         }
     }
 
     /// A trigger the packet path managed to hand over. Counted separately from
     /// the outcomes below so that "we saw it and let it go" and "we saw it and
     /// tried" never end up in the same number.
-    pub fn fire_triggered(&self) {
-        self.fire_triggers.add(1, &[]);
+    pub fn triggered(&self) {
+        self.fire_triggers.add(1, &self.via_attrs);
     }
 
-    fn fire_outcome(&self, outcome: FireOutcome) {
+    fn outcome(&self, outcome: FireOutcome) {
         let attrs = match outcome {
             FireOutcome::Sent => &self.fire_attrs[0],
             FireOutcome::Failed => &self.fire_attrs[1],
@@ -734,34 +836,36 @@ impl Metrics {
     /// `reaction` covers everything from the trigger being knowable; `send` is
     /// the part of it spent in the call. The difference between the two is the
     /// only share we can do anything about.
-    pub fn fire_sent(&self, reaction: Duration, send: Duration) {
-        self.fire_outcome(FireOutcome::Sent);
-        self.fire_reaction.record(reaction.as_secs_f64(), &[]);
-        self.fire_send.record(send.as_secs_f64(), &[]);
+    pub fn sent(&self, reaction: Duration, send: Duration) {
+        self.outcome(FireOutcome::Sent);
+        self.fire_reaction
+            .record(reaction.as_secs_f64(), &self.via_attrs);
+        self.fire_send.record(send.as_secs_f64(), &self.via_attrs);
     }
 
-    pub fn fire_failed(&self) {
-        self.fire_outcome(FireOutcome::Failed);
+    pub fn failed(&self) {
+        self.outcome(FireOutcome::Failed);
     }
 
-    pub fn fire_skipped(&self) {
-        self.fire_outcome(FireOutcome::Skipped);
+    pub fn skipped(&self) {
+        self.outcome(FireOutcome::Skipped);
     }
 
-    pub fn fire_dropped(&self) {
-        self.fire_outcome(FireOutcome::Dropped);
+    pub fn dropped(&self) {
+        self.outcome(FireOutcome::Dropped);
     }
 
-    pub fn fire_landed(&self, round_trip: Duration, slots_behind: u64) {
+    pub fn landed(&self, round_trip: Duration, slots_behind: u64) {
         self.fire_landed.add(1, &self.landed_attrs[0]);
-        self.fire_round_trip.record(round_trip.as_secs_f64(), &[]);
-        self.fire_slots_behind.record(slots_behind, &[]);
+        self.fire_round_trip
+            .record(round_trip.as_secs_f64(), &self.via_attrs);
+        self.fire_slots_behind.record(slots_behind, &self.via_attrs);
     }
 
     /// Sent, and never seen in a block. Its own outcome rather than silence,
     /// because a landing rate computed from sends alone cannot tell a
     /// transaction that is still in flight from one that was dropped.
-    pub fn fire_lost(&self) {
+    pub fn lost(&self) {
         self.fire_landed.add(1, &self.landed_attrs[1]);
     }
 
@@ -770,39 +874,15 @@ impl Metrics {
             .blockhash_age_ms
             .store(age.as_millis() as u64, Ordering::Relaxed);
     }
+}
 
-    pub fn slot_completed(
-        &self,
-        slot: u64,
-        duration: Option<Duration>,
-        shreds: u64,
-        transactions: u64,
-    ) {
-        self.slots.add(1, &[]);
-        self.gauges.current_slot.store(slot, Ordering::Relaxed);
-        if let Some(duration) = duration {
-            self.slot_duration.record(duration.as_secs_f64(), &[]);
-        }
-        self.slot_shreds.record(shreds, &[]);
-        self.slot_transactions.record(transactions, &[]);
-    }
+/// What we know about our own standing in the cluster, fed from gossip and the
+/// kernel rather than from the packet path.
+pub struct NodeMetrics {
+    gauges: Arc<Gauges>,
+}
 
-    /// The zeros matter as much as the one: the collector keeps serving a
-    /// series it stopped hearing about at its last value, so a leader that
-    /// rotates out has to be written down as not leading rather than simply
-    /// dropped.
-    pub fn slot_leader(&self, leader: &str, leading: bool) {
-        self.slot_leader.record(
-            u64::from(leading),
-            &[KeyValue::new("leader", leader.to_string())],
-        );
-    }
-
-    /// Highest slot seen on the wire, as [`Self::slot_completed`] left it.
-    pub fn current_slot(&self) -> u64 {
-        self.gauges.current_slot.load(Ordering::Relaxed)
-    }
-
+impl NodeMetrics {
     pub fn set_tvu_peers(&self, peers: u64) {
         self.gauges.tvu_peers.store(peers, Ordering::Relaxed);
     }
@@ -813,31 +893,81 @@ impl Metrics {
             .store(sources, Ordering::Relaxed);
     }
 
-    pub fn set_buffered_slots(&self, slots: u64) {
-        self.gauges.buffered_slots.store(slots, Ordering::Relaxed);
+    pub fn set_udp_drops(&self, drops: u64) {
+        self.gauges.udp_drops.store(drops, Ordering::Relaxed);
     }
+}
 
-    /// One `recvmmsg` return: `packets` datagrams handed to the parser at once.
-    pub fn queue_pushed(&self, packets: u64) {
-        self.recv_batch.record(packets, &[]);
-        let depth = self
-            .gauges
-            .queue_depth
-            .fetch_add(packets, Ordering::Relaxed)
-            + packets;
-        self.gauges
-            .queue_depth_peak
-            .fetch_max(depth, Ordering::Relaxed);
-    }
+pub struct MetricsGuard {
+    provider: Option<SdkMeterProvider>,
+}
 
-    pub fn queue_popped(&self, packets: u64) {
-        let _ =
-            self.gauges
-                .queue_depth
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |depth| {
-                    Some(depth.saturating_sub(packets))
-                });
+impl Drop for MetricsGuard {
+    fn drop(&mut self) {
+        if let Some(provider) = self.provider.take()
+            && let Err(err) = provider.shutdown()
+        {
+            warn!(%err, "failed to shut down meter provider");
+        }
     }
+}
+
+pub fn init(config: &Config) -> (Arc<Metrics>, MetricsGuard) {
+    let provider = if config.metrics_enabled {
+        match build_provider(config) {
+            Ok(provider) => {
+                global::set_meter_provider(provider.clone());
+                info!(
+                    endpoint = %config.otlp_endpoint,
+                    interval_secs = config.metrics_export_interval.as_secs(),
+                    "otlp metrics exporter started"
+                );
+                Some(provider)
+            }
+            Err(err) => {
+                warn!(%err, "failed to start otlp metrics exporter, metrics disabled");
+                None
+            }
+        }
+    } else {
+        info!("metrics disabled");
+        None
+    };
+
+    let metrics = Arc::new(Metrics::new(&global::meter(SCOPE), config.fire_via));
+    (metrics, MetricsGuard { provider })
+}
+
+fn build_provider(
+    config: &Config,
+) -> Result<SdkMeterProvider, opentelemetry_otlp::ExporterBuildError> {
+    let endpoint = format!(
+        "{}{METRICS_PATH}",
+        config.otlp_endpoint.trim_end_matches('/')
+    );
+    let exporter = MetricExporter::builder()
+        .with_http()
+        .with_protocol(Protocol::HttpBinary)
+        .with_endpoint(endpoint)
+        .with_timeout(config.metrics_export_timeout)
+        .with_temporality(Temporality::Cumulative)
+        .build()?;
+
+    let reader = PeriodicReader::builder(exporter)
+        .with_interval(config.metrics_export_interval)
+        .build();
+
+    let resource = Resource::builder()
+        .with_attributes([
+            KeyValue::new(SERVICE_NAME, config.service_name.clone()),
+            KeyValue::new(SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
+        ])
+        .build();
+
+    Ok(SdkMeterProvider::builder()
+        .with_resource(resource)
+        .with_reader(reader)
+        .build())
 }
 
 fn observable(

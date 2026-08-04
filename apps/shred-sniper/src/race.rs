@@ -13,10 +13,11 @@
 //! nothing about who went first. `same_entry` marks those lines.
 
 use {
-    crate::entries::DecodedBatch,
+    crate::{aged::AgedMap, entries::DecodedBatch},
+    rustc_hash::FxHashSet,
     solana_transaction::{Address, versioned::VersionedTransaction},
     std::{
-        collections::{BTreeMap, HashMap, HashSet},
+        collections::BTreeMap,
         time::{Duration, Instant},
     },
     tracing::{info, warn},
@@ -28,9 +29,6 @@ use {
 /// slot inside its own 400 ms, so a second of quiet means the stragglers and
 /// whatever erasure could rebuild are all in.
 const SETTLE: Duration = Duration::from_secs(1);
-
-/// Sweeping every slot on every batch would put this on the packet path.
-const EVICT_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Slot numbers are unauthenticated, so spoofed ones must not be able to pin
 /// memory. Well above what `SETTLE` can legitimately hold open.
@@ -66,15 +64,13 @@ struct Span {
 struct Slot {
     batches: BTreeMap<u32, Span>,
     hits: Vec<Hit>,
-    updated: Instant,
 }
 
 impl Slot {
-    fn new(now: Instant) -> Self {
+    fn new() -> Self {
         Self {
             batches: BTreeMap::new(),
             hits: Vec::new(),
-            updated: now,
         }
     }
 
@@ -158,10 +154,15 @@ impl Slot {
             return;
         }
 
+        let searcher_positions: Vec<(i64, i64)> = searchers
+            .iter()
+            .map(|searcher| self.position(searcher))
+            .collect();
         for target in &targets {
-            for searcher in &searchers {
-                let (target_transactions, target_entries) = self.position(target);
-                let (searcher_transactions, searcher_entries) = self.position(searcher);
+            let (target_transactions, target_entries) = self.position(target);
+            for (searcher, (searcher_transactions, searcher_entries)) in
+                searchers.iter().zip(searcher_positions.iter().copied())
+            {
                 info!(
                     slot,
                     target = %target.signature,
@@ -180,10 +181,9 @@ impl Slot {
 }
 
 pub struct Tracker {
-    searchers: HashSet<Address>,
-    targets: HashSet<Address>,
-    slots: HashMap<u64, Slot>,
-    last_evicted: Instant,
+    searchers: FxHashSet<Address>,
+    targets: FxHashSet<Address>,
+    slots: AgedMap<u64, Slot>,
 }
 
 impl Tracker {
@@ -199,8 +199,7 @@ impl Tracker {
         Some(Self {
             searchers: searchers.iter().copied().collect(),
             targets: targets.iter().copied().collect(),
-            slots: HashMap::new(),
-            last_evicted: Instant::now(),
+            slots: AgedMap::new(SETTLE, MAX_SLOTS, "race slots"),
         })
     }
 
@@ -231,8 +230,7 @@ impl Tracker {
                 .collect(),
         };
 
-        let held = self.slots.entry(slot).or_insert_with(|| Slot::new(now));
-        held.updated = now;
+        let held = self.slots.upsert(slot, now, Slot::new);
         held.batches.insert(batch.first_shred, span);
         held.hits.append(&mut hits);
     }
@@ -252,31 +250,11 @@ impl Tracker {
     }
 
     fn settle(&mut self, now: Instant) {
-        if now.duration_since(self.last_evicted) < EVICT_INTERVAL && self.slots.len() <= MAX_SLOTS {
-            return;
-        }
-        self.last_evicted = now;
-
-        self.slots.retain(|slot, held| {
-            let waiting = now.duration_since(held.updated) < SETTLE;
-            if !waiting {
-                held.report(*slot);
-            }
-            waiting
-        });
-
-        // Nothing legitimate reaches the cap, so when it is hit the slots to
-        // give up are the ones that have gone quiet.
-        if self.slots.len() > MAX_SLOTS {
-            let mut updated: Vec<Instant> = self.slots.values().map(|held| held.updated).collect();
-            updated.sort_unstable();
-            let cutoff = updated[updated.len() - MAX_SLOTS];
-            self.slots.retain(|_, held| held.updated >= cutoff);
-        }
+        self.slots.sweep(now, |slot, held| held.report(*slot));
     }
 }
 
-fn signature(transaction: &VersionedTransaction) -> String {
+pub(crate) fn signature(transaction: &VersionedTransaction) -> String {
     transaction
         .signatures
         .first()
@@ -294,7 +272,7 @@ mod tests {
     };
 
     fn slot_with(batches: &[(u32, u32, &[u32])]) -> Slot {
-        let mut slot = Slot::new(Instant::now());
+        let mut slot = Slot::new();
         for (first_shred, last_shred, entries) in batches {
             slot.batches.insert(
                 *first_shred,
